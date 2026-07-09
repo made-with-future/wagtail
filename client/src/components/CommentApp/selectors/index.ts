@@ -1,5 +1,5 @@
 import type { State } from '../state';
-import type { Comment } from '../state/comments';
+import type { Comment, Mention } from '../state/comments';
 import { createSelector } from 'reselect';
 
 export const selectComments = (state: State) => state.comments.comments;
@@ -31,6 +31,12 @@ export const selectIsDirty = createSelector(
   selectComments,
   selectRemoteCommentCount,
   (comments, remoteCommentCount) => {
+    const mentionIdsChanged = (original: Mention[], current: Mention[]) => {
+      const originalIds = original.map((mention) => String(mention.id)).sort();
+      const currentIds = current.map((mention) => String(mention.id)).sort();
+      return originalIds.join('\n') !== currentIds.join('\n');
+    };
+
     const readyComments = Array.from(comments.values()).filter(
       // `creating` means the user can still type the new comment and has not
       // "committed" it by clicking "Comment", so don't count it yet
@@ -44,7 +50,8 @@ export const selectIsDirty = createSelector(
         comment.deleted ||
         comment.resolved ||
         comment.replies.size !== comment.remoteReplyCount ||
-        comment.originalText !== comment.text
+        comment.originalText !== comment.text ||
+        mentionIdsChanged(comment.originalMentions, comment.mentions)
       ) {
         return true;
       }

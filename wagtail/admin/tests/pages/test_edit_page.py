@@ -19,6 +19,7 @@ from wagtail.admin.models import EditingSession
 from wagtail.exceptions import PageClassNotFoundError
 from wagtail.models import (
     Comment,
+    CommentMention,
     CommentReply,
     GroupPagePermission,
     Locale,
@@ -4494,6 +4495,20 @@ class TestCommenting(WagtailTestUtils, TestCase):
             [to for email in mail.outbox for to in email.to],
         )
 
+    def add_page_editor(self, username, **kwargs):
+        user = self.create_user(username, **kwargs)
+        group = Group.objects.create(name=f"{username} page editors")
+        group.permissions.add(
+            Permission.objects.get(
+                content_type__app_label="wagtailadmin", codename="access_admin"
+            )
+        )
+        group.user_set.add(user)
+        GroupPagePermission.objects.create(
+            group=group, page=self.child_page, permission_type="change"
+        )
+        return user
+
     def test_comments_enabled_by_default(self):
         response = self.client.get(
             reverse("wagtailadmin_pages:edit", args=[self.child_page.id])
@@ -4575,6 +4590,51 @@ class TestCommenting(WagtailTestUtils, TestCase):
         self.assertEqual(log_entry.data["comment"]["id"], comment.id)
         self.assertEqual(log_entry.data["comment"]["contentpath"], comment.contentpath)
         self.assertEqual(log_entry.data["comment"]["text"], comment.text)
+
+    def test_new_comment_with_mentions(self):
+        mentioned_user = self.add_page_editor(
+            "mentioned-user", email="mentioned-user@example.com"
+        )
+
+        post_data = {
+            "title": "I've been edited!",
+            "content": "Some content",
+            "slug": "hello-world",
+            "comments-TOTAL_FORMS": "1",
+            "comments-INITIAL_FORMS": "0",
+            "comments-MIN_NUM_FORMS": "0",
+            "comments-MAX_NUM_FORMS": "",
+            "comments-0-DELETE": "",
+            "comments-0-resolved": "",
+            "comments-0-id": "",
+            "comments-0-contentpath": "title",
+            "comments-0-text": "A test comment",
+            "comments-0-mentions": json.dumps([mentioned_user.pk]),
+            "comments-0-position": "",
+            "comments-0-replies-TOTAL_FORMS": "0",
+            "comments-0-replies-INITIAL_FORMS": "0",
+            "comments-0-replies-MIN_NUM_FORMS": "0",
+            "comments-0-replies-MAX_NUM_FORMS": "0",
+        }
+
+        response = self.client.post(
+            reverse("wagtailadmin_pages:edit", args=[self.child_page.id]), post_data
+        )
+
+        self.assertRedirects(
+            response, reverse("wagtailadmin_pages:edit", args=[self.child_page.id])
+        )
+
+        comment = self.child_page.wagtail_admin_comments.get()
+        mention = comment.mentions.get()
+        self.assertEqual(mention.user, mentioned_user)
+        self.assertIsNotNone(mention.notified_at)
+
+        recipients = [email.to for email in mail.outbox]
+        self.assertIn([self.subscriber.email], recipients)
+        self.assertIn([mentioned_user.email], recipients)
+        self.assertEqual(len(mail.outbox), 2)
+        self.assertNeverEmailedWrongUser()
 
     def test_new_comment_json(self):
         post_data = {
@@ -4700,6 +4760,100 @@ class TestCommenting(WagtailTestUtils, TestCase):
         self.assertEqual(log_entry.data["comment"]["id"], comment.id)
         self.assertEqual(log_entry.data["comment"]["contentpath"], comment.contentpath)
         self.assertEqual(log_entry.data["comment"]["text"], comment.text)
+
+    def test_edit_comment_only_notifies_new_mentions(self):
+        previously_mentioned_user = self.add_page_editor(
+            "previous-mention", email="previous-mention@example.com"
+        )
+        newly_mentioned_user = self.add_page_editor(
+            "new-mention", email="new-mention@example.com"
+        )
+        comment = Comment.objects.create(
+            page=self.child_page,
+            user=self.user,
+            text="A test comment",
+            contentpath="title",
+        )
+        CommentMention.objects.create(
+            comment=comment,
+            user=previously_mentioned_user,
+            notified_at=timezone.now(),
+        )
+
+        post_data = {
+            "title": "I've been edited!",
+            "content": "Some content",
+            "slug": "hello-world",
+            "comments-TOTAL_FORMS": "1",
+            "comments-INITIAL_FORMS": "1",
+            "comments-MIN_NUM_FORMS": "0",
+            "comments-MAX_NUM_FORMS": "",
+            "comments-0-DELETE": "",
+            "comments-0-resolved": "",
+            "comments-0-id": str(comment.id),
+            "comments-0-contentpath": "title",
+            "comments-0-text": "Edited",
+            "comments-0-mentions": json.dumps(
+                [previously_mentioned_user.pk, newly_mentioned_user.pk]
+            ),
+            "comments-0-position": "",
+            "comments-0-replies-TOTAL_FORMS": "0",
+            "comments-0-replies-INITIAL_FORMS": "0",
+            "comments-0-replies-MIN_NUM_FORMS": "0",
+            "comments-0-replies-MAX_NUM_FORMS": "0",
+        }
+
+        response = self.client.post(
+            reverse("wagtailadmin_pages:edit", args=[self.child_page.id]), post_data
+        )
+
+        self.assertRedirects(
+            response, reverse("wagtailadmin_pages:edit", args=[self.child_page.id])
+        )
+
+        recipients = [email.to for email in mail.outbox]
+        self.assertEqual(recipients, [[newly_mentioned_user.email]])
+        self.assertNeverEmailedWrongUser()
+
+        comment.refresh_from_db()
+        self.assertEqual(
+            set(comment.mentions.values_list("user_id", flat=True)),
+            {previously_mentioned_user.pk, newly_mentioned_user.pk},
+        )
+        self.assertFalse(comment.mentions.filter(notified_at__isnull=True).exists())
+
+    def test_new_comment_with_inaccessible_mention_is_rejected(self):
+        post_data = {
+            "title": "I've been edited!",
+            "content": "Some content",
+            "slug": "hello-world",
+            "comments-TOTAL_FORMS": "1",
+            "comments-INITIAL_FORMS": "0",
+            "comments-MIN_NUM_FORMS": "0",
+            "comments-MAX_NUM_FORMS": "",
+            "comments-0-DELETE": "",
+            "comments-0-resolved": "",
+            "comments-0-id": "",
+            "comments-0-contentpath": "title",
+            "comments-0-text": "A test comment",
+            "comments-0-mentions": json.dumps([self.never_emailed_user.pk]),
+            "comments-0-position": "",
+            "comments-0-replies-TOTAL_FORMS": "0",
+            "comments-0-replies-INITIAL_FORMS": "0",
+            "comments-0-replies-MIN_NUM_FORMS": "0",
+            "comments-0-replies-MAX_NUM_FORMS": "0",
+        }
+
+        response = self.client.post(
+            reverse("wagtailadmin_pages:edit", args=[self.child_page.id]), post_data
+        )
+
+        self.assertEqual(
+            response.context["form"].formsets["comments"].errors,
+            [{"mentions": ["Select a valid user to mention."]}],
+        )
+        self.assertFalse(self.child_page.wagtail_admin_comments.exists())
+        self.assertEqual(len(mail.outbox), 0)
 
     def test_edit_another_users_comment(self):
         comment = Comment.objects.create(
@@ -5174,6 +5328,67 @@ class TestCommenting(WagtailTestUtils, TestCase):
 
         # No emails should be submitted because subscriber is inactive
         self.assertEqual(len(mail.outbox), 0)
+
+    def test_comment_mention_suggestions(self):
+        mentioned_user = self.add_page_editor(
+            "mentionable",
+            email="mentionable@example.com",
+            first_name="Mention",
+            last_name="Able",
+        )
+        self.add_page_editor("not-matching", email="not-matching@example.com")
+        self.create_user(
+            "inaccessible-mention",
+            email="inaccessible-mention@example.com",
+            first_name="Mention",
+            last_name="Noaccess",
+        )
+
+        response = self.client.get(
+            reverse(
+                "wagtailadmin_pages:comment_mention_suggestions",
+                args=[self.child_page.id],
+            ),
+            {"q": "mention"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "results": [
+                    {
+                        "id": str(mentioned_user.pk),
+                        "name": "Mention Able",
+                        "email": "mentionable@example.com",
+                        "url": reverse(
+                            "wagtailusers_users:edit", args=[mentioned_user.pk]
+                        ),
+                    }
+                ]
+            },
+        )
+
+    def test_comment_mention_suggestions_require_page_edit_permission(self):
+        self.client.logout()
+        user = self.create_user("not-an-editor", password="password")
+        user.user_permissions.add(
+            Permission.objects.get(
+                content_type__app_label="wagtailadmin", codename="access_admin"
+            )
+        )
+        self.login(user)
+
+        response = self.client.get(
+            reverse(
+                "wagtailadmin_pages:comment_mention_suggestions",
+                args=[self.child_page.id],
+            ),
+            {"q": "mention"},
+            headers={"x-requested-with": "XMLHttpRequest"},
+        )
+
+        self.assertEqual(response.status_code, 403)
 
 
 class TestCommentOutput(WagtailTestUtils, TestCase):

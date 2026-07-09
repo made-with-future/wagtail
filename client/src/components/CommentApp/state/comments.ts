@@ -9,6 +9,15 @@ export interface Author {
   id: any;
   name: string;
   avatarUrl?: string;
+  email?: string;
+  url?: string;
+}
+
+export interface Mention {
+  id: any;
+  name: string;
+  email: string;
+  url: string;
 }
 
 export type CommentReplyMode =
@@ -108,6 +117,9 @@ export interface Comment {
   text: string;
   originalText: string;
   newText: string;
+  mentions: Mention[];
+  originalMentions: Mention[];
+  newMentions: Mention[];
 }
 
 export interface NewCommentOptions {
@@ -117,6 +129,7 @@ export interface NewCommentOptions {
   resolved?: boolean;
   deleted?: boolean;
   replies?: Map<number, CommentReply>;
+  mentions?: Mention[];
 }
 
 export function newComment(
@@ -133,6 +146,7 @@ export function newComment(
     resolved = false,
     deleted = false,
     replies = new Map(),
+    mentions = [],
   }: NewCommentOptions,
 ): Comment {
   return {
@@ -146,6 +160,9 @@ export function newComment(
     date,
     text,
     originalText: text,
+    mentions,
+    originalMentions: mentions,
+    newMentions: [],
     replies,
     newReply: '',
     newText: '',
@@ -158,7 +175,9 @@ export function newComment(
   };
 }
 
-export type CommentUpdate = Partial<Omit<Comment, 'originalText'>>;
+export type CommentUpdate = Partial<
+  Omit<Comment, 'originalText' | 'originalMentions'>
+>;
 
 export interface CommentsState {
   comments: Map<number, Comment>;

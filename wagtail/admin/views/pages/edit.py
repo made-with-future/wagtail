@@ -18,9 +18,11 @@ from django.views.generic.base import View
 from wagtail.actions.publish_page_revision import PublishPageRevisionAction
 from wagtail.admin import messages
 from wagtail.admin.action_menu import PageActionMenu
+from wagtail.admin.forms.comments import can_user_be_mentioned_for_page
 from wagtail.admin.mail import send_notification
 from wagtail.admin.models import EditingSession
 from wagtail.admin.telepath import JSContext
+from wagtail.admin.templatetags.wagtailadmin_tags import user_display_name
 from wagtail.admin.ui.autosave import AutosaveIndicator
 from wagtail.admin.ui.components import MediaContainer
 from wagtail.admin.ui.editing_sessions import EditingSessionsModule
@@ -39,6 +41,7 @@ from wagtail.locks import BasicLock, ScheduledForPublishLock, WorkflowLock
 from wagtail.models import (
     COMMENTS_RELATION_NAME,
     Comment,
+    CommentMention,
     CommentReply,
     Page,
     PageSubscription,
@@ -47,6 +50,51 @@ from wagtail.models import (
     get_default_page_content_type,
 )
 from wagtail.utils.timestamps import render_timestamp
+
+
+class CommentMentionSuggestionsView(View):
+    def dispatch(self, request, page_id, **kwargs):
+        self.page = get_object_or_404(Page, id=page_id).specific
+        if not self.page.permissions_for_user(request.user).can_edit():
+            raise PermissionDenied
+        return super().dispatch(request, page_id, **kwargs)
+
+    def get(self, request, page_id):
+        query = request.GET.get("q", "").strip()
+        if not query:
+            return JsonResponse({"results": []})
+
+        user_model = get_user_model()
+        user_fields = {field.name for field in user_model._meta.get_fields()}
+        search_fields = {"email", "first_name", "last_name", user_model.USERNAME_FIELD}
+        search_filter = Q()
+        for field_name in search_fields & user_fields:
+            search_filter |= Q(**{f"{field_name}__icontains": query})
+
+        results = []
+        users = (
+            user_model.objects.filter(search_filter, is_active=True)
+            .select_related("wagtail_userprofile")
+            .order_by("email", user_model._meta.pk.name)
+        )
+        for user in users:
+            if not can_user_be_mentioned_for_page(self.page, user):
+                continue
+
+            results.append(
+                {
+                    "id": str(user.pk),
+                    "name": user_display_name(user),
+                    "email": user.email,
+                    "url": reverse(
+                        "wagtailusers_users:edit", args=[quote(str(user.pk))]
+                    ),
+                }
+            )
+            if len(results) == 10:
+                break
+
+        return JsonResponse({"results": results})
 
 
 class EditView(
@@ -101,6 +149,7 @@ class EditView(
         """
         # Get changes
         comments_formset = self.form.formsets["comments"]
+        comments_formset.save_mentions()
         new_comments = comments_formset.new_objects
         deleted_comments = comments_formset.deleted_objects
 
@@ -113,6 +162,21 @@ class EditView(
 
             if "text" in changed_fields:
                 edited_comments.append(changed_comment)
+
+        new_mention_comment_ids = {
+            comment.pk for comment in new_comments if comment.pk is not None
+        }
+        new_mention_comment_ids.update(
+            changed_comment.pk
+            for changed_comment, changed_fields in comments_formset.changed_objects
+            if "mentions" in changed_fields
+        )
+        new_mentions = list(
+            CommentMention.objects.filter(
+                comment_id__in=new_mention_comment_ids,
+                notified_at__isnull=True,
+            ).select_related("comment", "user")
+        )
 
         new_replies = []
         deleted_replies = []
@@ -144,6 +208,7 @@ class EditView(
             "new_replies": new_replies,
             "deleted_replies": deleted_replies,
             "edited_replies": edited_replies,
+            "new_mentions": new_mentions,
         }
 
     def send_commenting_notifications(self, changes):
@@ -158,60 +223,92 @@ class EditView(
             comment.pk for comment, replies in changes["new_replies"]
         )
 
-        # Skip if no changes were made
-        # Note: We don't email about edited comments so ignore those here
-        if (
-            not changes["new_comments"]
-            and not changes["deleted_comments"]
-            and not changes["resolved_comments"]
-            and not changes["new_replies"]
-        ):
-            return
-
-        # Get global page comment subscribers
-        subscribers = PageSubscription.objects.filter(
-            page=self.page, comment_notifications=True
-        ).select_related("user")
-        global_recipient_users = [
-            subscriber.user
-            for subscriber in subscribers
-            if subscriber.user != self.request.user
-        ]
-
-        # Get subscribers to individual threads
-        replies = CommentReply.objects.filter(comment_id__in=relevant_comment_ids)
-        comments = Comment.objects.filter(id__in=relevant_comment_ids)
-        thread_users = (
-            get_user_model()
-            .objects.exclude(pk=self.request.user.pk)
-            .exclude(pk__in=subscribers.values_list("user_id", flat=True))
-            .filter(
-                Q(comment_replies__comment_id__in=relevant_comment_ids)
-                | Q(**{("%s__pk__in" % COMMENTS_RELATION_NAME): relevant_comment_ids})
-            )
-            .prefetch_related(
-                Prefetch("comment_replies", queryset=replies),
-                Prefetch(COMMENTS_RELATION_NAME, queryset=comments),
-            )
+        has_comment_notification_changes = (
+            bool(changes["new_comments"])
+            or bool(changes["deleted_comments"])
+            or bool(changes["resolved_comments"])
+            or bool(changes["new_replies"])
         )
 
-        # Skip if no recipients
-        if not (global_recipient_users or thread_users):
+        # Skip if no changes were made
+        # Note: We don't email about edited comments so ignore those here
+        if not has_comment_notification_changes and not changes["new_mentions"]:
             return
-        thread_users = [
-            (
-                user,
-                set(
-                    list(user.comment_replies.values_list("comment_id", flat=True))
-                    + list(
-                        getattr(user, COMMENTS_RELATION_NAME).values_list(
-                            "pk", flat=True
-                        )
+
+        global_recipient_users = []
+        global_recipient_user_ids = set()
+        thread_users = []
+        thread_user_ids = set()
+
+        if has_comment_notification_changes:
+            # Get global page comment subscribers
+            subscribers = PageSubscription.objects.filter(
+                page=self.page, comment_notifications=True
+            ).select_related("user")
+            global_recipient_users = [
+                subscriber.user
+                for subscriber in subscribers
+                if subscriber.user != self.request.user
+            ]
+            global_recipient_user_ids = {user.pk for user in global_recipient_users}
+
+            # Get subscribers to individual threads
+            replies = CommentReply.objects.filter(comment_id__in=relevant_comment_ids)
+            comments = Comment.objects.filter(id__in=relevant_comment_ids)
+            thread_users = (
+                get_user_model()
+                .objects.exclude(pk=self.request.user.pk)
+                .exclude(pk__in=subscribers.values_list("user_id", flat=True))
+                .filter(
+                    Q(comment_replies__comment_id__in=relevant_comment_ids)
+                    | Q(
+                        **{
+                            ("%s__pk__in" % COMMENTS_RELATION_NAME): (
+                                relevant_comment_ids
+                            )
+                        }
                     )
-                ),
+                )
+                .prefetch_related(
+                    Prefetch("comment_replies", queryset=replies),
+                    Prefetch(COMMENTS_RELATION_NAME, queryset=comments),
+                )
             )
-            for user in thread_users
-        ]
+
+            thread_users = [
+                (
+                    user,
+                    set(
+                        list(user.comment_replies.values_list("comment_id", flat=True))
+                        + list(
+                            getattr(user, COMMENTS_RELATION_NAME).values_list(
+                                "pk", flat=True
+                            )
+                        )
+                    ),
+                )
+                for user in thread_users
+            ]
+            thread_user_ids = {user.pk for user, threads in thread_users}
+
+        mention_comments_by_user = {}
+        for mention in changes["new_mentions"]:
+            if (
+                mention.user_id == self.request.user.pk
+                or mention.user_id in global_recipient_user_ids
+                or mention.user_id in thread_user_ids
+            ):
+                continue
+
+            mention_comments_by_user.setdefault(mention.user, []).append(
+                mention.comment
+            )
+
+        # Skip if no recipients
+        if not (global_recipient_users or thread_users or mention_comments_by_user):
+            self.mark_comment_mentions_notified(changes["new_mentions"])
+            return
+
         mailed_users = set()
 
         for current_user, current_threads in thread_users:
@@ -253,24 +350,49 @@ class EditView(
                 },
             )
 
-        return send_notification(
-            global_recipient_users,
-            "updated_comments",
-            {
-                "page": self.page,
-                "editor": self.request.user,
-                "new_comments": changes["new_comments"],
-                "resolved_comments": changes["resolved_comments"],
-                "deleted_comments": changes["deleted_comments"],
-                "replied_comments": [
-                    {
-                        "comment": comment,
-                        "replies": replies,
-                    }
-                    for comment, replies in changes["new_replies"]
-                ],
-            },
-        )
+        for user, mentioned_comments in mention_comments_by_user.items():
+            send_notification(
+                [user],
+                "updated_comments",
+                {
+                    "page": self.page,
+                    "editor": self.request.user,
+                    "new_comments": mentioned_comments,
+                    "resolved_comments": [],
+                    "deleted_comments": [],
+                    "replied_comments": [],
+                },
+            )
+
+        sent = None
+        if has_comment_notification_changes:
+            sent = send_notification(
+                global_recipient_users,
+                "updated_comments",
+                {
+                    "page": self.page,
+                    "editor": self.request.user,
+                    "new_comments": changes["new_comments"],
+                    "resolved_comments": changes["resolved_comments"],
+                    "deleted_comments": changes["deleted_comments"],
+                    "replied_comments": [
+                        {
+                            "comment": comment,
+                            "replies": replies,
+                        }
+                        for comment, replies in changes["new_replies"]
+                    ],
+                },
+            )
+        self.mark_comment_mentions_notified(changes["new_mentions"])
+        return sent
+
+    def mark_comment_mentions_notified(self, mentions):
+        mention_ids = [mention.pk for mention in mentions]
+        if mention_ids:
+            CommentMention.objects.filter(pk__in=mention_ids).update(
+                notified_at=timezone.now()
+            )
 
     def log_commenting_changes(self, changes, revision):
         """

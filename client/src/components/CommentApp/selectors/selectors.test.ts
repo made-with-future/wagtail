@@ -79,6 +79,22 @@ test('Select is dirty', () => {
 
   expect(selectIsDirty(stateWithEditedComment)).toBe(true);
 
+  const stateWithEditedMentions = reducer(
+    stateWithSavedComment,
+    actions.updateComment(1, {
+      mentions: [
+        {
+          id: 2,
+          name: 'Mentioned User',
+          email: 'mentioned@example.com',
+          url: '/admin/users/2/',
+        },
+      ],
+    }),
+  );
+
+  expect(selectIsDirty(stateWithEditedMentions)).toBe(true);
+
   const stateWithUnsavedReply = reducer(
     stateWithSavedComment,
     actions.addReply(

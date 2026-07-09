@@ -34,9 +34,7 @@ from django.utils.text import capfirst, slugify
 from django.utils.translation import gettext
 from django.utils.translation import gettext_lazy as _
 from modelcluster.fields import ParentalKey
-from modelcluster.models import (
-    ClusterableModel,
-)
+from modelcluster.models import ClusterableModel, get_all_child_relations
 from treebeard.mp_tree import MP_Node, MP_NodeManager
 
 from wagtail.actions.copy_for_translation import CopyPageForTranslationAction
@@ -2737,10 +2735,17 @@ class Comment(ClusterableModel):
                 update_fields = (
                     update_fields if update_fields else self._meta.get_fields()
                 )
+                child_relation_names = {
+                    rel.get_accessor_name() for rel in get_all_child_relations(self)
+                }
                 update_fields = [
                     field.name
                     for field in update_fields
-                    if field.name not in {"position", "id"}
+                    if field.name in child_relation_names
+                    or (
+                        getattr(field, "concrete", False)
+                        and field.name not in {"position", "id"}
+                    )
                 ]
             else:
                 # This is a new instance, we have to preserve and then restore the position via a variable
@@ -2800,6 +2805,26 @@ class Comment(ClusterableModel):
         block = field.get_block_by_content_path(field_value, remainder)
         # content path is valid if this returns a BoundBlock rather than None
         return bool(block)
+
+
+class CommentMention(models.Model):
+    comment = models.ForeignKey(
+        Comment, on_delete=models.CASCADE, related_name="mentions"
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="comment_mentions",
+    )
+    notified_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = [("comment", "user")]
+        verbose_name = _("comment mention")
+        verbose_name_plural = _("comment mentions")
+
+    def __str__(self):
+        return f"CommentMention for '{self.user}' on comment '{self.comment_id}'"
 
 
 class CommentReply(models.Model):

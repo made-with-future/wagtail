@@ -28,6 +28,7 @@ import {
   Author,
   Comment,
   INITIAL_STATE as INITIAL_COMMENTS_STATE,
+  Mention,
   newComment,
   newCommentReply,
 } from './state/comments';
@@ -50,6 +51,7 @@ export interface InitialComment {
   pk: number;
   user: any;
   text: string;
+  mentions: any[];
   created_at: string;
   updated_at: string;
   replies: InitialCommentReply[];
@@ -60,18 +62,42 @@ export interface InitialComment {
 }
 
 const getAuthor = (
-  authors: Map<string, { name: string; avatar_url: string }>,
+  authors: Map<
+    string,
+    { name: string; avatar_url: string; email?: string; url?: string }
+  >,
   id: any,
 ): Author => {
   const authorData = getOrDefault(authors, String(id), {
     name: '',
     avatar_url: '',
+    email: '',
+    url: '',
   });
 
   return {
     id,
     name: authorData.name,
     avatarUrl: authorData.avatar_url,
+    email: authorData.email,
+    url: authorData.url,
+  };
+};
+
+const getMention = (
+  authors: Map<
+    string,
+    { name: string; avatar_url: string; email?: string; url?: string }
+  >,
+  id: any,
+): Mention => {
+  const author = getAuthor(authors, id);
+
+  return {
+    id,
+    name: author.name,
+    email: author.email || '',
+    url: author.url || '',
   };
 };
 
@@ -87,7 +113,8 @@ function CommentListing({
   comments,
 }: CommentListingProps): React.ReactElement {
   const state = store.getState();
-  const { user, currentTab, isReloading } = state.settings;
+  const { user, currentTab, isReloading, mentionSuggestionsUrl } =
+    state.settings;
   const { focusedComment, forceFocus } = state.comments;
   const commentsListRef = React.useRef<HTMLOListElement | null>(null);
   // Update the position of the comments listing as the window scrolls to keep the comments in line with the content
@@ -144,6 +171,7 @@ function CommentListing({
       isFocused={comment.localId === focusedComment}
       forceFocus={forceFocus}
       isVisible={layout.getCommentVisible(currentTab, comment.localId)}
+      mentionSuggestionsUrl={mentionSuggestionsUrl}
     />
   ));
 
@@ -158,7 +186,11 @@ function CommentListing({
 export interface CommentAppData {
   comments: InitialComment[];
   user: number | string;
-  authors: Record<string, { name: string; avatar_url: string }>;
+  authors: Record<
+    string,
+    { name: string; avatar_url: string; email?: string; url?: string }
+  >;
+  mention_suggestions_url?: string;
 }
 
 export interface LoadDataOptions {
@@ -288,11 +320,13 @@ export class CommentApp {
       comments: initialComments,
       user: userId,
       authors: authorsData,
+      mention_suggestions_url: mentionSuggestionsUrl,
     }: CommentAppData,
     { skipRemoved = false, focusedCommentId }: LoadDataOptions = {},
   ) {
     const authors = new Map(Object.entries(authorsData));
     this.setUser(userId, authors);
+    this.store.dispatch(updateGlobalSettings({ mentionSuggestionsUrl }));
 
     // Check if there is "comment" query parameter.
     // If this is set, the user has clicked on a "View on frontend" link of an
@@ -331,6 +365,9 @@ export class CommentApp {
               text: comment.text,
               deleted: comment.deleted,
               resolved: comment.resolved,
+              mentions: (comment.mentions || []).map((mentionedUserId) =>
+                getMention(authors, mentionedUserId),
+              ),
             },
           ),
         ),

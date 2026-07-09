@@ -67,6 +67,14 @@ urlpatterns = [
         name="edit",
     ),
     path(
+        "<int:page_id>/edit/comment-mention-suggestions/",
+        page_viewset_registry.as_view(
+            "comment_mention_suggestions",
+            page_id_kwarg="page_id",
+        ),
+        name="comment_mention_suggestions",
+    ),
+    path(
         "<int:page_id>/edit/preview/",
         page_viewset_registry.as_view(
             "preview_on_edit",

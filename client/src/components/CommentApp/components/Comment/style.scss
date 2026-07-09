@@ -60,6 +60,50 @@ $box-padding: 20px;
     white-space: pre-wrap;
   }
 
+  &__mention {
+    color: theme('colors.text-link-default');
+    font-weight: 700;
+  }
+
+  &__mention-input {
+    position: relative;
+  }
+
+  &__mention-suggestions {
+    position: absolute;
+    z-index: 1;
+    list-style: none;
+    margin: 2px 0 0;
+    padding: 0;
+    width: 100%;
+    background-color: theme('colors.surface-page');
+    border: 1px solid theme('colors.border-field-default');
+    border-radius: 3px;
+    box-shadow: 0 2px 4px theme('colors.black-10');
+  }
+
+  &__mention-suggestion {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: 100%;
+    padding: 8px 10px;
+    color: $color-box-text;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+
+    &--highlighted,
+    &:hover {
+      background-color: theme('colors.surface-field');
+    }
+
+    span:first-child {
+      font-weight: 700;
+    }
+  }
+
   form {
     border-top: 1px solid theme('colors.border-furniture');
   }

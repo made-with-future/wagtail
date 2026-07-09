@@ -16,7 +16,9 @@ import { LayoutController } from '../../utils/layout';
 import { getNextReplyId } from '../../utils/sequences';
 import { CommentHeader } from '../CommentHeader';
 import CommentReplyComponent from '../CommentReply';
+import MentionTextArea from '../MentionTextArea';
 import TextArea from '../TextArea';
+import CommentText from './CommentText';
 
 async function saveComment(comment: Comment, store: Store) {
   store.dispatch(
@@ -30,6 +32,7 @@ async function saveComment(comment: Comment, store: Store) {
       updateComment(comment.localId, {
         mode: 'default',
         text: comment.newText,
+        mentions: comment.newMentions,
         remoteId: comment.remoteId,
         author: comment.author,
         date: comment.date,
@@ -78,6 +81,7 @@ export interface CommentProps {
   isVisible: boolean;
   layout: LayoutController;
   user: Author | null;
+  mentionSuggestionsUrl?: string;
 }
 
 export default class CommentComponent extends React.Component<CommentProps> {
@@ -202,6 +206,14 @@ export default class CommentComponent extends React.Component<CommentProps> {
       );
     };
 
+    const onChangeMentions = (mentions: Comment['mentions']) => {
+      store.dispatch(
+        updateComment(comment.localId, {
+          newMentions: mentions,
+        }),
+      );
+    };
+
     const onSave = async (e: React.FormEvent) => {
       e.preventDefault();
       await saveComment(comment, store);
@@ -224,11 +236,14 @@ export default class CommentComponent extends React.Component<CommentProps> {
           focused={isFocused}
         />
         <form onSubmit={onSave}>
-          <TextArea
+          <MentionTextArea
             focusTarget={isFocused}
             className="comment__input"
             value={comment.newText}
+            mentions={comment.newMentions}
+            mentionSuggestionsUrl={this.props.mentionSuggestionsUrl}
             onChange={onChangeText}
+            onMentionsChange={onChangeMentions}
             placeholder={gettext('Enter your comments...')}
             additionalAttributes={{
               'aria-describedby': descriptionId,
@@ -266,6 +281,14 @@ export default class CommentComponent extends React.Component<CommentProps> {
       );
     };
 
+    const onChangeMentions = (mentions: Comment['mentions']) => {
+      store.dispatch(
+        updateComment(comment.localId, {
+          newMentions: mentions,
+        }),
+      );
+    };
+
     const onSave = async (e: React.FormEvent) => {
       e.preventDefault();
 
@@ -279,6 +302,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
         updateComment(comment.localId, {
           mode: 'default',
           newText: comment.text,
+          newMentions: comment.mentions,
         }),
       );
     };
@@ -294,14 +318,17 @@ export default class CommentComponent extends React.Component<CommentProps> {
           focused={isFocused}
         />
         <form onSubmit={onSave}>
-          <TextArea
+          <MentionTextArea
             focusTarget={isFocused}
             className="comment__input"
             value={comment.newText}
+            mentions={comment.newMentions}
+            mentionSuggestionsUrl={this.props.mentionSuggestionsUrl}
             additionalAttributes={{
               'aria-describedby': descriptionId,
             }}
             onChange={onChangeText}
+            onMentionsChange={onChangeMentions}
           />
           <div className="comment__actions">
             <button
@@ -335,7 +362,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           store={store}
           focused={isFocused}
         />
-        <p className="comment__text">{comment.text}</p>
+        <CommentText text={comment.text} mentions={comment.mentions} />
         <div className="comment__progress">{gettext('Saving...')}</div>
         {this.renderReplies({ hideNewReply: true })}
       </>
@@ -358,7 +385,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           store={store}
           focused={isFocused}
         />
-        <p className="comment__text">{comment.text}</p>
+        <CommentText text={comment.text} mentions={comment.mentions} />
         {this.renderReplies({ hideNewReply: true })}
         <div className="comment__error">
           {gettext('Save error')}
@@ -400,7 +427,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           store={store}
           focused={isFocused}
         />
-        <p className="comment__text">{comment.text}</p>
+        <CommentText text={comment.text} mentions={comment.mentions} />
         <div className="comment__confirm-delete">
           {gettext('Are you sure?')}
           <button
@@ -433,7 +460,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           store={store}
           focused={isFocused}
         />
-        <p className="comment__text">{comment.text}</p>
+        <CommentText text={comment.text} mentions={comment.mentions} />
         <div className="comment__progress">{gettext('Deleting')}</div>
         {this.renderReplies({ hideNewReply: true })}
       </>
@@ -466,7 +493,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           store={store}
           focused={isFocused}
         />
-        <p className="comment__text">{comment.text}</p>
+        <CommentText text={comment.text} mentions={comment.mentions} />
         {this.renderReplies({ hideNewReply: true })}
         <div className="comment__error">
           {gettext('Delete error')}
@@ -504,6 +531,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           updateComment(comment.localId, {
             mode: 'editing',
             newText: comment.text,
+            newMentions: comment.mentions,
           }),
         );
       };
@@ -527,7 +555,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           onDelete={onDelete}
           focused={isFocused}
         />
-        <p className="comment__text">{comment.text}</p>
+        <CommentText text={comment.text} mentions={comment.mentions} />
         {this.renderReplies()}
       </>
     );

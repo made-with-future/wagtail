@@ -145,6 +145,13 @@ export function CommentFormComponent({
         prefix={fullPrefix}
       />
       <PrefixedHiddenInput
+        fieldName="mentions"
+        value={JSON.stringify(
+          comment.mentions.map((mention) => String(mention.id)),
+        )}
+        prefix={fullPrefix}
+      />
+      <PrefixedHiddenInput
         fieldName="position"
         value={comment.position}
         prefix={fullPrefix}

@@ -57,6 +57,7 @@ from .pages import (  # noqa: F401
     AbstractPage,
     BasePageManager,
     Comment,
+    CommentMention,
     CommentReply,
     GroupPagePermission,
     GroupPagePermissionManager,

@@ -6,6 +6,7 @@ export interface SettingsState {
   user: Author | null;
   currentTab: string | null;
   isReloading: boolean;
+  mentionSuggestionsUrl?: string;
 }
 
 export type SettingsStateUpdate = Partial<SettingsState>;
@@ -15,6 +16,7 @@ export const INITIAL_STATE: SettingsState = {
   user: null,
   currentTab: null,
   isReloading: false,
+  mentionSuggestionsUrl: undefined,
 };
 
 export const reducer = produce(

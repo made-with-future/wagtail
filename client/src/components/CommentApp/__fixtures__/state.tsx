@@ -37,6 +37,23 @@ const remoteComment: Comment = {
   date: 0,
   text: 'test text',
   originalText: 'test text',
+  mentions: [
+    {
+      id: 2,
+      name: 'Mentioned User',
+      email: 'mentioned@example.com',
+      url: '/admin/users/2/',
+    },
+  ],
+  originalMentions: [
+    {
+      id: 2,
+      name: 'Mentioned User',
+      email: 'mentioned@example.com',
+      url: '/admin/users/2/',
+    },
+  ],
+  newMentions: [],
   newReply: '',
   newText: '',
   remoteReplyCount: 1,
@@ -59,6 +76,9 @@ const localComment: Comment = {
   date: 0,
   text: 'unsaved comment',
   originalText: 'unsaved comment',
+  mentions: [],
+  originalMentions: [],
+  newMentions: [],
   newReply: '',
   newText: '',
   replies: new Map(),
