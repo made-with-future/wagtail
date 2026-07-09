@@ -1,14 +1,16 @@
-# Comment mentions for Wagtail 7.4
+# Comment mentions with Wagtail 7.4 compatibility
 
-Status: chat-approved design; written specification awaiting review before implementation planning
+Status: approved design, including the Wagtail 8 primary-branch and Wagtail 7.4 compatibility strategy
 
-Target: Wagtail `stable/7.4.x`, including Django 5.2 and 6.0 and Wagtail's supported custom user models
+Primary development base: the current pull-request branch on Wagtail 8.0 alpha
+
+Compatibility floor: Wagtail `stable/7.4.x`, including Django 5.2 and 6.0 and Wagtail's supported custom user models
 
 ## Context
 
 This change adds `@` mentions to page comments and replies. A page editor can select another eligible editor while writing, the selected text is retained as a structured mention, and a newly mentioned user can receive the existing updated-comments email with wording that distinguishes a direct mention from an ordinary subscription notification.
 
-The current pull request proves the basic interaction but is based on Wagtail 8.0 alpha code rather than Wagtail 7.4 and has correctness problems that make it unsuitable to harden in place:
+The current pull request proves the basic interaction on Wagtail 8.0 alpha code, but it has correctness problems that require a substantial redesign rather than incremental patching:
 
 - Page creation crashes while serializing the suggestion URL because it attempts to reverse an edit-page route with a page ID of `None`.
 - Mentions entered while creating a page are returned to the browser but are neither persisted nor notified.
@@ -22,7 +24,7 @@ The current pull request proves the basic interaction but is based on Wagtail 8.
 - The suggestion endpoint does unbounded filtering with per-result permission checks, has avoidable query growth, and remains reachable when comments are disabled.
 - Replies cannot contain mentions, mention-only edits are missing from audit data, and edited comments can be presented as "new comments" in email.
 
-The implementation will be rebuilt against the 7.4 branch rather than forward-porting Wagtail 8.0 routing assumptions.
+The implementation will be rebuilt on the current pull-request branch. Feature logic and data contracts will remain independent of Wagtail 8-only routing APIs, and a real backport worktree will prove that the result works on `stable/7.4.x` with only the expected route-registration, migration-dependency, and test-location adaptations.
 
 ## Goals
 
@@ -45,6 +47,7 @@ The implementation will be rebuilt against the 7.4 branch rather than forward-po
 - Rich-text formatting inside comments is outside this change.
 - The first version will not link rendered mentions to the user-management interface. This avoids both permission-sensitive links and navigation away from unsaved page edits.
 - Delivery retries and durable email outboxes are outside this change; mention mail follows Wagtail's existing comment-email delivery guarantees.
+- This work does not publish a second pull request or release branch for 7.4. The required 7.4 deliverable is a retained, committed local compatibility branch plus reproducible evidence that the primary feature can be backported; publishing that branch requires separate authorization.
 
 ## Considered approaches
 
@@ -85,7 +88,7 @@ The list is stored sorted by `(start, end, key)`. Occurrence keys must be unique
 
 Each comment or reply may contain at most 20 mention occurrences. A normalized label is limited to 255 UTF-16 code units; candidates with a longer generated label are not returned. The UTF-8 encoded mention field is limited to 16 KiB before JSON parsing. Repeated occurrences and duplicate display names are supported. Notifications are deduplicated by target user within a message, but the occurrences remain distinct for rendering and editing.
 
-The JSON fields replace the proposed `CommentMention` relation and `notified_at` state. The migration is based on the latest migration on `stable/7.4.x`, adds empty lists for existing rows, and does not require a data backfill from an unreleased schema. Removing the relation also removes the proposed `Comment.save()` workaround for reverse fields.
+The JSON fields replace the proposed `CommentMention` relation and `notified_at` state. The primary migration is based on the current branch's migration graph and adds empty lists for existing rows. The 7.4 compatibility backport regenerates only the migration dependency or filename if its graph requires that mechanical difference; the operations and resulting schema remain identical. No data backfill from an unreleased schema is required. Removing the relation also removes the proposed `Comment.save()` workaround for reverse fields.
 
 ## Editing interaction
 
@@ -203,9 +206,17 @@ Audit data for comment and reply creation or edit includes added and removed men
 
 ## Compatibility and branch strategy
 
-Implementation begins from the latest `stable/7.4.x`, not the current 8.0-alpha-based feature commits. Routing integrates with Wagtail 7.4's direct page edit and create views. The work must preserve Wagtail's supported Python, Django, database, browser, and custom-user configurations rather than depending on PostgreSQL-only JSON operations or integer primary keys.
+PR 1 remains based on its current Wagtail 8-era `main` branch. Existing mention code may be replaced freely, but unrelated upstream code and commits remain untouched. Core range handling, validation, candidate selection, form semantics, serialization, notifications, and frontend state live in modules and interfaces shared with Wagtail 7.4; they must not depend on Wagtail 8-only page-viewset behavior.
 
-The final branch contains only commits relevant to comment mentions, a release-note fragment in the repository's expected format, tests, and any necessary user/developer documentation. Before publishing, its commit range is checked against the current upstream 7.4 merge base. The pull request description uses `.github/PULL_REQUEST_TEMPLATE.md`, explains the behavior and architectural tradeoffs, highlights range validation, create-page authorization, and notification merging for careful review, and includes the required AI-assistance disclosure.
+Routing is the deliberate compatibility seam. The primary branch registers the shared suggestion views through Wagtail 8's `PageViewSet` structure. The 7.4 backport registers those same views through the direct page edit/create URL configuration used by `stable/7.4.x`. Any other source difference discovered during the backport is treated as a compatibility defect unless it is limited to migration dependency numbering or test-file placement.
+
+Before implementation and again before final verification, the official branches are refreshed with `git fetch --no-tags https://github.com/wagtail/wagtail.git +refs/heads/main:refs/remotes/upstream/main +refs/heads/stable/7.4.x:refs/remotes/upstream/stable/7.4.x`, and both fetched commit IDs are recorded. Compatibility is then proved continuously on a committed local `compat/comment-mentions-7.4` branch in a separate worktree based on that exact 7.4 commit. The current feature diff relative to PR 1's recorded base is exported and applied after each coherent backend/frontend slice; it is not inferred from the stale pre-redesign commits.
+
+The compatibility branch is retained through final handoff. A committed report at `docs/superpowers/compatibility/2026-07-09-comment-mentions-7.4.md` records the primary base/head, official 7.4 base/head, patch checksum, commit mapping, `git range-diff` output or an explicit explanation where a one-to-one commit mapping is impossible, file-level name/status and stat comparisons, every adaptation, and all verification commands and results. The report and local branch are the compatibility deliverable; a clean compile or theoretical API comparison is not sufficient. The report must show that adaptations are limited to the declared routing, migration-dependency, or test-location seams, or identify a design defect that must be corrected on the primary branch.
+
+Both branches must preserve their supported Python, Django, database, browser, and custom-user configurations rather than depending on PostgreSQL-only JSON operations, integer primary keys, or APIs introduced after 7.4.
+
+The final PR branch contains only commits relevant to comment mentions, a release-note fragment in the repository's expected format, tests, and any necessary user/developer documentation. Before publishing, its commit range is checked against the current upstream `main` merge base, while the compatibility worktree is separately checked against the current `stable/7.4.x` merge base. The pull request description uses `.github/PULL_REQUEST_TEMPLATE.md`, explains the behavior and architectural tradeoffs, highlights range validation, create-page authorization, notification merging, and the 7.4 backport evidence for careful review, and includes the required AI-assistance disclosure.
 
 ## Test strategy
 
@@ -216,7 +227,7 @@ Implementation is test-driven and covers the contract at five layers.
 - Existing comments and replies receive empty mention lists.
 - Both models round-trip valid occurrence JSON across supported databases.
 - Malformed stored entries are sanitized on read, warn without sensitive payload data, render only escaped plain text, do not make another author's form dirty, and are cleaned on the next authorized standard-browser save.
-- The migration graph is based on the 7.4 branch and leaves no pending migration.
+- The primary and 7.4-backport migration graphs each leave no pending migration and produce the same JSON-field schema.
 - Saving comments no longer needs special handling for a reverse mention relation.
 
 ### Form, lifecycle, and endpoint tests
@@ -254,14 +265,26 @@ Implementation is test-driven and covers the contract at five layers.
 - Automated accessibility checks run with the popup closed, loading, empty, and populated.
 - The comment mention Playwright regression runs in Chromium in automated verification. Before the pull request is published, the same keyboard, multiline, paste, emoji, reload, and popup-accessibility scenario is run manually in current Firefox and the result is recorded in the pull request. WebKit/Safari remains an encouraged reviewer check rather than a release gate because the repository's current integration setup is Chromium-only.
 
+### Cross-version verification matrix
+
+The primary Wagtail 8-era branch and committed 7.4 compatibility branch each run:
+
+- the complete focused comment, reply, create/edit page, suggestion, notification, audit, permission, migration, serialization, and custom-user backend suites;
+- the surrounding existing page create/edit and comment regression suites;
+- the frontend mention unit suites, TypeScript checks, ESLint, formatting, style linting, and production build;
+- migration consistency checks; and
+- the Chromium mention Playwright scenario with Axe checks, including both edit-page and create-page suggestion routing.
+
+The 7.4 branch additionally runs its Django 5.2 and Django 6.0 test environments and UUID email-user configuration. The primary branch runs its repository-declared Django/default-user matrix plus the UUID email-user configuration. The required manual Firefox scenario runs against the primary branch; the automated 7.4 Chromium run covers the version-specific browser routing seam.
+
 ## Acceptance criteria
 
 The implementation is ready when:
 
-1. The complete focused backend and frontend mention suites pass on the 7.4 baseline.
-2. Existing page create/edit, comment, reply, notification, audit, and permission suites pass unchanged or with intentional assertions added.
-3. Django 5.2 and Django 6.0 configurations pass, including the UUID email-user configuration.
-4. Frontend type checking, linting, formatting, style linting, and production build checks pass.
-5. Migration checks pass and the feature uses no database-specific behavior outside Wagtail's supported contract.
-6. The automated Chromium mention regression passes, automated Axe checks pass for each popup state, and the required Firefox manual scenario and version are recorded in the pull request.
-7. A final diff and commit-history review confirms the branch is based on current `stable/7.4.x`, contains no unrelated commits, includes the release note, and uses the required pull request template and AI disclosure.
+1. The complete cross-version matrix above passes on the primary Wagtail 8-era branch and committed compatibility branch based on a freshly fetched and recorded official `stable/7.4.x` commit.
+2. Existing page create/edit, comment, reply, notification, audit, and permission suites pass unchanged or with intentional assertions added on both branches.
+3. Django 5.2 and Django 6.0 pass on 7.4, and each branch's UUID email-user configuration passes.
+4. Frontend type checking, linting, formatting, style linting, production build, Chromium mention regression, and Axe checks pass on both branches; the required primary-branch Firefox manual scenario and version are recorded.
+5. Migration checks pass on both branches and produce the same schema operations without database-specific behavior outside Wagtail's supported contract.
+6. The retained compatibility branch and committed report contain the recorded OIDs, patch checksum, commit/diff comparison, exhaustive adaptation list, and command output required to reproduce the compatibility conclusion.
+7. A final diff and commit-history review confirms PR 1 remains based on current upstream `main`, contains no unrelated commits, includes the release note, and uses the required pull request template and AI disclosure; the compatibility report confirms that the 7.4 backport differs only at the declared compatibility seams.
