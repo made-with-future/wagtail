@@ -19,7 +19,7 @@ The current pull request proves the basic interaction on Wagtail 8.0 alpha code,
 - Mention identity is inferred from mutable, non-unique email-shaped text. Empty or duplicate email addresses, renamed accounts, repeated display names, and forged mention payloads are not handled safely.
 - Mention rows are saved after the page revision or publish transaction. Invalid or duplicate payloads can fail after part of the page save has already succeeded.
 - Notification deduplication happens globally by recipient, so a subscription notification for one changed comment can suppress a direct-mention notification for another. Mention rows are then marked notified even when no message was sent.
-- The custom `contenteditable` implementation does not preserve the browser's native textarea guarantees for multiline text, selection replacement, paste, undo, IME composition, mobile input, or assistive technology. It also has stale-query and stale-caret races.
+- The custom `contenteditable` implementation does not preserve reliable multiline text, selection replacement, paste, undo, IME composition, mobile input, or assistive-technology behavior. It also has stale-query and stale-caret races and recreates entity tracking that Draftail already provides.
 - The shared author serialization exposes commenter email addresses and user-management URLs to page editors who do not necessarily have permission to manage users.
 - The suggestion endpoint does unbounded filtering with per-result permission checks, has avoidable query growth, and remains reachable when comments are disabled.
 - Replies cannot contain mentions, mention-only edits are missing from audit data, and edited comments can be presented as "new comments" in email.
@@ -32,8 +32,10 @@ The implementation will be rebuilt on the current pull-request branch. Feature l
 - Support the full page lifecycle: page creation, draft save, autosave, publish, submit for moderation, and later edit.
 - Preserve normal comment and page-save behavior when an existing mentioned user is renamed, deactivated, deleted, or loses page permission.
 - Treat mention identity and text placement as structured server-validated data, without parsing saved prose to recover identity.
-- Preserve native character editing, keyboard access, screen-reader semantics, mobile input, IME composition, paste, selection, and text undo behavior; occurrence identity follows the explicit sidecar rules below.
-- Avoid expanding the comment payload with separate raw email fields or user-management URLs. On an email-as-username user model, Wagtail's canonical display identity can itself be an email address and remains usable wherever Wagtail would normally display that identity.
+- Preserve reliable character editing, keyboard access, screen-reader semantics, mobile input, IME composition, paste, selection, and undo behavior by using Wagtail's established Draftail entity model instead of a bespoke editor.
+- Keep `Comment.text` and `CommentReply.text` as plain strings while rendering mention entities inline during editing and as styled spans after save.
+- Hydrate the configured email field's current value as narrowly scoped mention metadata without expanding ordinary comment-author records or adding user-management URLs.
+- Maintain exact-message relational indexes so a user's top-level comment and reply mentions can be queried efficiently without database-specific JSON lookups.
 - Keep mention persistence atomic with the comment or reply save and make notification behavior deterministic.
 - Work with integer, UUID, and converted custom user primary keys supported by Wagtail's test configurations.
 - Bound suggestion and submitted-mention work to predictable limits.
@@ -45,25 +47,26 @@ The implementation will be rebuilt on the current pull-request branch. Feature l
 - Arbitrary pasted `@text` is not automatically converted into a mention.
 - Cross-site, external-email, group, role, and team mentions are outside this change.
 - Rich-text formatting inside comments is outside this change.
+- A global email-versus-display-name mention-label setting is outside this change. The data model preserves label snapshots so such a setting can govern future mentions without rewriting existing comments.
 - The first version will not link rendered mentions to the user-management interface. This avoids both permission-sensitive links and navigation away from unsaved page edits.
 - Delivery retries and durable email outboxes are outside this change; mention mail follows Wagtail's existing comment-email delivery guarantees.
 - This work does not publish a second pull request or release branch for 7.4. The required 7.4 deliverable is a retained, committed local compatibility branch plus reproducible evidence that the primary feature can be backported; publishing that branch requires separate authorization.
 
 ## Considered approaches
 
+### Mini Draftail entities plus structured ranges
+
+Use Draftail with no toolbar, formatting controls, links, or other rich-text features. Mention entities provide inline highlighting and established selection/entity behavior while the editor still extracts an ordinary plain-text value. The persisted occurrence sidecar makes the entity contract independently server-validatable and reconstructs the entities on hydration.
+
+This follows the [Mini Draftail RFC](https://github.com/emilytoppm/rfcs/blob/d4cdf48e9a19e4c4bcb46df0e7c7cd9b1c3fe06f/text/000-mini-draftail.md): Draftail acts as an admin utility layer for entities attached to general text entry, without changing the database representation of the text field. It is the selected approach.
+
 ### Native textarea plus structured ranges
 
-Keep the existing native textarea as the editing surface and store selected mention occurrences as ranges alongside the plain comment text. A suggestion list is visually anchored to the textarea, but text input and selection remain browser-native.
+A native textarea would have the smallest editing surface and strongest direct browser guarantees. It cannot render styled spans around individual mentions, however, and requires application code to reconcile occurrence ranges after every edit. It is not selected because inline mention identity should remain visible while composing.
 
-This approach has the smallest editing surface, supports both comments and replies consistently, and makes the data contract independently testable. It is the selected approach.
+### Canvas, overlays, or bespoke contenteditable behavior
 
-### Draft.js entities plus structured ranges
-
-Draft.js could provide inline entity highlighting while editing and Wagtail already carries related frontend experience. It would nevertheless introduce a rich-editor state model for a plain-text field, require conversion and hydration logic, and add keyboard, screen-reader, and lifecycle complexity to a small feature. It is not selected.
-
-### Harden the custom contenteditable and relational occurrence model
-
-The current pull request could be extended with DOM normalization, custom selection bookkeeping, IME handling, relation-derived form initial values, and transactional relation saves. This retains inline styling during editing but preserves the largest browser-specific risk and the invasive reverse-relation behavior on `Comment.save()`. It is not selected.
+A canvas would require reimplementing text selection, caret movement, clipboard, undo, IME, mobile input, and assistive-technology semantics. A textarea overlay would add fragile scroll, wrapping, zoom, and forced-colors synchronization. Hardening the current custom `contenteditable` would retain the same browser-specific risk. These approaches are not selected.
 
 ## Data model
 
@@ -74,39 +77,44 @@ The current pull request could be extended with DOM normalization, custom select
   "key": "29cc6a1f-00ed-41d7-94b1-d46a947962cb",
   "user_id": "42",
   "start": 14,
-  "end": 26,
-  "label": "@Jane Smith"
+  "end": 31,
+  "label": "@jane@example.com"
 }
 ```
 
 - `key` is a client-generated UUID for the occurrence. It remains stable while an occurrence is retained and distinguishes a retained occurrence from a newly added occurrence.
 - `user_id` is the target user's primary key serialized through the model field's supported string representation. Server lookup and validation use the user model field rather than assuming an integer.
 - `start` and `end` are half-open offsets into the saved plain text, measured in UTF-16 code units. JavaScript selection offsets already use this unit. Python validation uses a dedicated UTF-16 boundary helper so emoji and other non-BMP characters have identical offsets on both sides.
-- `label` is the exact snapshot inserted into the text. It is `@` plus Wagtail's display name for the user, with line breaks and runs of whitespace collapsed. If that result has no usable name, `user.get_username()` is used as the fallback. On an email-as-username model this fallback is intentionally the email-valued canonical identity; the API does not add a second email field. A label longer than 255 UTF-16 code units is truncated on a code-point boundary and ends with a single ellipsis within that limit. The server supplies and validates this value for new occurrences.
+- `label` is the exact snapshot inserted into the plain text. For this release it is `@` plus the user's current configured email value, with line breaks and runs of whitespace collapsed. A blank email falls back to Wagtail's display name and then `user.get_username()`. A future global label-mode setting may choose the display name first for newly inserted mentions, but it never rewrites saved labels. A label longer than 255 UTF-16 code units is truncated on a code-point boundary and ends with a single ellipsis within that limit. The server supplies and validates this value for new occurrences.
 
 The list is stored sorted by `(start, end, key)`. Occurrence keys must be unique within a message, ranges must not overlap, and every range must fall on UTF-16 code-point boundaries and select text exactly equal to `label`.
 
-Each comment or reply may contain at most 20 mention occurrences. A normalized label is limited to 255 UTF-16 code units using the deterministic truncation rule above, so overlong display names do not create a post-permission candidate window or hide later eligible results. The UTF-8 encoded mention field is limited to 16 KiB before JSON parsing. Repeated occurrences and duplicate display names are supported. Notifications are deduplicated by target user within a message, but the occurrences remain distinct for rendering and editing.
+Each comment or reply may contain at most 20 mention occurrences. A normalized label is limited to 255 UTF-16 code units using the deterministic truncation rule above, so overlong email, display-name, or username values do not create a post-permission candidate window or hide later eligible results. The UTF-8 encoded mention field is limited to 16 KiB before JSON parsing. Repeated occurrences and duplicate display labels are supported. Notifications are deduplicated by target user within a message, but the occurrences remain distinct for rendering and editing.
 
-The JSON fields replace the proposed `CommentMention` relation and `notified_at` state. The primary migration is based on the current branch's migration graph and adds empty lists for existing rows. The 7.4 compatibility backport regenerates only the migration dependency or filename if its graph requires that mechanical difference; the operations and resulting schema remain identical. No data backfill from an unreleased schema is required. Removing the relation also removes the proposed `Comment.save()` workaround for reverse fields.
+The occurrence JSON is the authoritative per-message editing, rendering, audit, and notification record. Two normalized lookup models provide efficient inverse queries without attempting cross-database containment queries over JSON arrays:
+
+- `CommentMention(comment, user)` has one row per distinct user referenced by a top-level comment, unique on `(comment, user)`.
+- `CommentReplyMention(reply, user)` has one row per distinct user referenced by a reply, unique on `(reply, user)`.
+
+Both foreign keys on both lookup models use `related_name="+"`; inverse queries go through `CommentMention.objects` or `CommentReplyMention.objects` rather than adding reverse fields to `Comment`, `CommentReply`, or the user model. Repeated occurrences for the same user create one lookup row. A reply lookup reaches its thread through the existing `CommentReply.comment` relation. The lookup rows contain no range, label, occurrence key, delivery state, or `notified_at` field and are never used to decide whether a mention is newly added. They are synchronized from validated JSON inside the same transaction as the message save. Deleting a user cascades the lookup rows while leaving the saved JSON label and range intact; a deleted target therefore remains visible as historical text but no longer has an inverse user lookup.
+
+The primary migration replaces the prototype relation with both JSON fields and the two lookup models based on the current branch's migration graph. The 7.4 compatibility backport changes only the migration dependency or filename if its graph requires that mechanical difference; the operations and resulting schema remain identical. No data backfill from an unreleased schema is required. The derived lookup models do not participate in `Comment.save()` field discovery, so the prototype's reverse-relation workaround is removed.
 
 ## Editing interaction
 
-Comments and replies continue to use a native `<textarea>`. For query recognition, token characters are Unicode letters and numbers plus `_`, `.`, `+`, `-`, `'`, and `@`. An active query starts with an `@` at the beginning of the text or after a non-token character, then contains between 1 and 64 UTF-16 code units made only from token characters. Whitespace, a newline, or other punctuation closes it. These rules allow partial names, usernames, and email addresses while avoiding a trigger inside ordinary `person@example.com` text. Results match active Wagtail admin users by display name, username, or email, but the response contains only the identifier and display fields required by this control.
+Comments and replies use a Mini Draftail editor: `DraftailEditor` with no toolbar, inline styles, block types beyond ordinary paragraphs, links, or other rich-text features. Its only entity type is `MENTION`. The editor extracts plain text with newline separators for `Comment.text` or `CommentReply.text`; raw Draft.js content is never persisted. Hydration reconstructs Draft.js entity ranges from the validated occurrence JSON. This keeps the model and all existing plain-text consumers unchanged while showing highlighted mention spans during composition.
 
-Selecting a result replaces the active `@query` range with the server-provided label and records its occurrence range. Multiple occurrences may target the same user. Because identity is carried by the occurrence record, users with identical labels remain unambiguous; a secondary username in each suggestion distinguishes them before selection.
+Each Draft.js mention entity carries the occurrence `key`, canonical `user_id`, and snapshot `label` and uses Draft.js `IMMUTABLE` mutability so an edit through its text removes the entity association instead of silently changing its target. Current email metadata is hydrated separately and is not entity identity or saved content. For query recognition, token characters are Unicode letters and numbers plus `_`, `.`, `+`, `-`, `'`, and `@`. An active query starts with an `@` at the beginning of the current plain text or after a non-token character, then contains between 1 and 64 UTF-16 code units made only from token characters. Whitespace, a newline, or other punctuation closes it. These rules allow partial names, usernames, and email addresses while avoiding a trigger inside ordinary `person@example.com` text.
 
-The saved label remains ordinary selectable text in the textarea. The control reconciles ranges with every native text change using the edit delta between the previous and current value:
+Selecting a result replaces the active `@query` range with the server-provided label and applies a new `MENTION` entity with a client-generated occurrence key. Multiple occurrences may target the same user. Because identity is carried by the occurrence record, users with identical labels remain unambiguous; current email and a secondary username can distinguish them before selection.
 
-- An edit entirely before an occurrence shifts its range.
-- An edit entirely after an occurrence leaves its range unchanged.
-- An edit that intersects an occurrence removes its structured identity, leaving the resulting characters as ordinary text.
+Draft.js maintains entity positions as text is edited. Serialization flattens ordinary blocks with `\n`, walks the resulting entity ranges, converts block-local offsets to absolute UTF-16 offsets, and emits the canonical sorted occurrence list. An edit entirely before or after an occurrence shifts or preserves its entity range through Draft.js. An edit that changes only part of a mention or makes its entity text differ from the snapshot label removes that entity while leaving the resulting characters as ordinary text. This intentionally avoids immutable-token behavior.
 
-This intentionally avoids immutable token behavior. Backspace, selection replacement, cut, paste, mobile editing, and IME composition remain native. Native typing, deletion, cut, and paste participate in the browser's character undo stack; application-driven suggestion insertion is not promised as a native undo entry. The browser's undo and redo stack governs characters only, not the sidecar occurrence metadata. Once an edit intersects an occurrence, its identity is removed for the rest of that editing session; later undo can restore the label characters but not the identity. Selecting the user again is the explicit way to create a new occurrence key. Copying a mention produces plain text, and pasting that text does not create a mention until the user selects a suggestion again.
+Draftail's editor state owns text and entity undo/redo together. Suggestion insertion is one undoable editor change, and undoing or redoing an intersecting edit restores or removes the associated identity consistently with the text. Cut and paste are normalized through the plain-text path: copied mention text is ordinary text when pasted and does not gain an entity until the user selects a suggestion. Multiline text, selection replacement, mobile input, and IME composition use Draftail and Draft.js behavior rather than custom DOM range or caret walkers.
 
-The suggestion popup follows the accessible textbox-with-listbox pattern while leaving focus in the native textarea:
+The suggestion popup follows the accessible textbox-with-listbox pattern while leaving focus in Draftail's editing surface:
 
-- The textarea keeps its implicit multiline textbox role and has an accessible name, `aria-autocomplete="list"`, `aria-haspopup="listbox"`, `aria-controls`, and `aria-activedescendant` while an option is active. It does not use `role="combobox"` or `aria-expanded`, which are not valid for a native multiline textarea; opening, closing, loading, empty, and error states are conveyed through the visible popup and live status text.
+- The Draftail editing surface keeps its multiline textbox semantics and accessible name. The mention-editor wrapper applies and tests the list-autocomplete relationship, popup ownership, expanded state, and active-option announcement on the actual focusable editing surface rather than adding a second input.
 - Results use listbox and option semantics with stable IDs and selected state.
 - Arrow keys move the active result, Enter selects it, Escape closes the list, and Tab retains its normal focus-navigation behavior.
 - Pointer selection works without losing the current text selection.
@@ -115,9 +123,9 @@ The suggestion popup follows the accessible textbox-with-listbox pattern while l
 
 Queries use a 200 ms debounce. Starting a new query aborts the preceding request, clears stale selectable results, and tags the request so an out-of-order response cannot replace newer results. Composition events do not trigger premature matching. Blur, form cancellation, comment deletion, and component unmount close the popup and abort outstanding work.
 
-The hidden form field is rendered for every comment and reply form. Its model-form initial value is the canonical stored occurrence list, and the browser submits the complete hydrated list for every participating form, including unchanged forms. Unchanged metadata therefore compares equal to its relation-derived initial value. Cancel restores both the text and the occurrence list. Dirty-state comparisons include occurrence metadata so adding or removing a mention without otherwise changing the visible text is still a real edit. Older or custom clients that omit the field retain the backward-compatible preserve behavior defined below; the backend detects omission with an explicit sentinel rather than collapsing it to an empty list.
+The hidden form field is rendered for every comment and reply form. Its model-form initial value is the canonical stored occurrence list, and the browser submits the complete entity-derived list for every participating form, including unchanged forms. Unchanged metadata therefore compares equal to its model-derived initial value. Cancel restores the prior Draftail state, plain text, and occurrence list. Dirty-state comparisons include canonical occurrence metadata so adding or removing a mention without otherwise changing visible text is still a real edit. Older or custom clients that omit the field retain the backward-compatible preserve behavior defined below; the backend detects omission with an explicit sentinel rather than collapsing it to an empty list.
 
-After save, the ordinary comment display renders the referenced ranges as styled mention spans. Deleted or inaccessible users keep their saved label and styling; they do not become broken links. Rendering operates on validated ranges and escapes the surrounding text and labels normally.
+During editing, Draftail's mention decorator renders each entity as a styled span. After save, the ordinary comment display renders the referenced ranges with the same visual treatment. Deleted or inaccessible users keep their saved label and styling; they do not become broken links. Rendering operates on validated ranges and escapes the surrounding text and labels normally.
 
 ## Suggestions and permissions
 
@@ -128,11 +136,11 @@ There are two parent-scoped suggestion contexts:
 
 The existing-page endpoint requires the same authenticated-user and `page.permissions_for_user(request.user).can_edit()` gate as the page edit view. The create endpoint requires the same parent permission, child-model `can_create_at`, and page-type checks as the Wagtail 7.4 create view. Both return no results when `WAGTAILADMIN_COMMENTS_ENABLED` is false or the resolved edit handler has no `CommentPanel`. A request cannot broaden the parent, page, content type, or model scope encoded by its URL and server-side view context.
 
-Candidates must be active, have usable Wagtail admin access, and pass the relevant page permission check. A missing email address does not invalidate the visible mention, but it prevents email delivery. This is consistent with comments being collaboration metadata rather than an access-control mechanism.
+Candidates must be active, have usable Wagtail admin access, and pass the relevant page permission check. A missing email address falls back to display name or username for the visible label and prevents email delivery. This is consistent with comments being collaboration metadata rather than an access-control mechanism.
 
 The candidate service expresses page permission, active status, and `wagtailadmin.access_admin` membership as Django database permission filters before applying search, `distinct()`, deterministic ordering by the configured username field and primary key, and a 10-row slice. This intentionally follows Wagtail's database-backed page/admin permission policies rather than attempting to execute arbitrary dynamic authentication-backend `has_perm()` logic in a queryset. There is no pre-permission candidate window and therefore no false-negative window or per-result permission query. The endpoint independently enforces the 64-UTF-16-unit query limit. Empty queries do not enumerate all users. UUID and other custom primary keys are serialized without URL pre-quoting or double encoding.
 
-The response uses the exact wire shape `{"results": [{"id": "canonical-pk", "label": "@Display name", "username": "secondary-name"}]}`. `username` is omitted when `user.get_username()` does not add a distinct disambiguator. The response does not add a separate email field, user-edit URL, notification preference, or permission detail. Email can be a search input without becoming an additional response field; on an email-as-username model the canonical username/display value can itself be an email address.
+The response uses the exact wire shape `{"results": [{"id": "canonical-pk", "label": "@current@example.com", "email": "current@example.com", "username": "secondary-name"}]}`. `email` is the current configured email-field value and may be an empty string when the label used a fallback. `username` is omitted when `user.get_username()` does not add a distinct disambiguator. The response never adds a user-edit URL, notification preference, or permission detail. Only active, currently eligible candidates appear in this response.
 
 ## Form validation and persistence
 
@@ -156,13 +164,23 @@ Form omission and explicit clearing have different meanings:
 
 An unchanged comment or reply owned by another user must not become changed merely because the form was submitted. Allowed resolve and reposition operations preserve its mention metadata. Unauthorized text or occurrence edits continue to use the existing comment authorization errors.
 
-Validated mention JSON is assigned to the comment or reply before its normal save. The page revision, comment objects, reply objects, occurrence metadata, and audit entry participate in the same transaction boundary. A malformed or unauthorized occurrence produces a form error and no partial revision, publish, workflow action, or notification.
+Validated mention JSON is assigned to the comment or reply before its normal save. After message primary keys exist, the distinct current target-user set synchronizes the appropriate `CommentMention` or `CommentReplyMention` lookup rows inside the same transaction. Repeated occurrences do not create duplicate rows, and a retained occurrence whose user has since been deleted remains in JSON without recreating a lookup row. The page revision, comment objects, reply objects, occurrence metadata, lookup rows, and audit entry participate in the same transaction boundary. A malformed or unauthorized occurrence produces a form error and no partial revision, publish, workflow action, lookup update, or notification.
 
 ## Serialization, rendering, and privacy
 
-The comment API serializes occurrence lists independently for comments and replies. Each occurrence already contains the only data needed for presentation: a stable target identifier, safe snapshot label, and validated range. It does not bulk-load referenced users or emit a mention-user map. Existing author serialization retains its pre-feature name/avatar contract and gains no mention-specific email addresses or user-management URLs.
+The comment API serializes occurrence lists independently for comments and replies. Each occurrence contains the stable target identifier, safe snapshot label, and validated range needed to reconstruct the Draftail entity. In one bulk user query across the sanitized occurrence IDs, it also emits a separate exact map of current metadata:
 
-Mention spans are presentation, not authorization, and are never linked to admin user records. Deleting a target user therefore changes neither the serialized occurrence nor its styling; notification code resolves users only for newly added targets during validation.
+```json
+{
+  "mentioned_users": {
+    "42": {"email": "current@example.com"}
+  }
+}
+```
+
+The map contains only still-existing users referenced by a serialized occurrence and only the configured email-field value; missing users are omitted and blank email values remain blank. This current email is presentation metadata, is never written into saved text or occurrence JSON during hydration, and does not make a form dirty. Existing author serialization retains its pre-feature name/avatar contract and gains no email addresses or user-management URLs. The mention payload likewise contains no user-management URL, notification preference, or permission details.
+
+Mention spans are presentation, not authorization, and are never linked to admin user records. Deleting a target user therefore changes neither the serialized occurrence nor its styling; it removes the inverse lookup row and live metadata entry. Renaming a user or changing their email updates only the separately hydrated metadata, not the snapshot label. Notification code resolves users from newly added occurrence targets rather than treating lookup-row creation as a notification event.
 
 Server-rendered email and HTML must not trust the JSON label as markup. All text is escaped, and range slicing uses the same UTF-16 helper used by validation.
 
@@ -214,7 +232,7 @@ Before implementation and again before final verification, the official branches
 
 The compatibility branch is retained through final handoff. A committed report at `docs/superpowers/compatibility/2026-07-09-comment-mentions-7.4.md` records the primary base/head, official 7.4 base/head, runtime-feature patch checksum, commit mapping, `git range-diff` output or an explicit explanation where a one-to-one commit mapping is impossible, file-level name/status and stat comparisons, every adaptation, and all verification commands and results. The runtime patch and equivalence comparison exclude primary-only design/plan/compatibility reports, pull-request administration, changelog, contributor, and release-note files. The report and local branch are the compatibility deliverable; a clean compile or theoretical API comparison is not sufficient. The report must show that runtime and test adaptations are limited to the declared routing, migration-dependency, or test-location seams, or identify a design defect that must be corrected on the primary branch.
 
-Both branches must preserve their supported Python, Django, database, browser, and custom-user configurations rather than depending on PostgreSQL-only JSON operations, integer primary keys, or APIs introduced after 7.4.
+Mini Draftail uses the Draftail and Draft.js dependencies already shipped by both target branches; this feature adds no editor dependency and does not store raw Draft.js content. Both branches must preserve their supported Python, Django, database, browser, and custom-user configurations rather than depending on PostgreSQL-only JSON operations, integer primary keys, or APIs introduced after 7.4.
 
 The final PR branch contains only commits relevant to comment mentions, tests, and necessary user/developer documentation. Wagtail's contributor guide reserves `CHANGELOG.txt`, `docs/releases/8.0.md`, and `CONTRIBUTORS.md` updates for core committers after human review and acceptance, so this unreviewed contributor branch does not edit them; the pull request supplies suggested release-note and contributor copy for the accepting maintainer. Before publishing, its commit range is checked against the current upstream `main` merge base, while the compatibility worktree is separately checked against the current `stable/7.4.x` merge base. The pull request description uses `.github/PULL_REQUEST_TEMPLATE.md`, explains the behavior and architectural tradeoffs, highlights range validation, create-page authorization, notification merging, and the 7.4 backport evidence for careful review, and includes the required AI-assistance disclosure.
 
@@ -226,9 +244,11 @@ Implementation is test-driven and covers the contract at five layers.
 
 - Existing comments and replies receive empty mention lists.
 - Both models round-trip valid occurrence JSON across supported databases.
+- `CommentMention` and `CommentReplyMention` enforce exact-message/user uniqueness, collapse repeated occurrences, support efficient inverse lookups, and reach reply threads through `CommentReply.comment`.
+- Lookup rows synchronize atomically from valid occurrence JSON, disappear when their user is deleted, and do not remove or rewrite the historical occurrence JSON.
 - Malformed stored entries are sanitized on read, warn without sensitive payload data, render only escaped plain text, do not make another author's form dirty, and are cleaned on the next authorized standard-browser save.
-- The primary and 7.4-backport migration graphs each leave no pending migration and produce the same JSON-field schema.
-- Saving comments no longer needs special handling for a reverse mention relation.
+- The primary and 7.4-backport migration graphs each leave no pending migration and produce the same JSON-field and lookup-table schema.
+- Saving comments no longer needs special handling for reverse-relation field discovery.
 
 ### Form, lifecycle, and endpoint tests
 
@@ -240,7 +260,8 @@ Implementation is test-driven and covers the contract at five layers.
 - Page create, draft save, autosave, publish, and submit-for-moderation persist valid mentions without partial saves on failure.
 - Comment resolve and reposition preserve another author's mentions.
 - Reply create, edit, remove, cancel, reload, and notification behavior match top-level comments.
-- Existing-page and create-page suggestions enforce the exact 7.4 page-policy behavior for direct group permissions, inherited permissions, add-only ownership, and superusers; requester access; admin access; page comments enabled state; 64-unit queries; deterministic 10-result limits; complete eligible results without a candidate window; empty results; inactive users; UUID/custom primary keys; and bounded query counts.
+- Existing-page and create-page suggestions enforce the exact 7.4 page-policy behavior for direct group permissions, inherited permissions, add-only ownership, and superusers; requester access; admin access; page comments enabled state; 64-unit queries; deterministic 10-result limits; complete eligible results without a candidate window; empty results; inactive users; UUID/custom primary keys; exact current-email metadata; and bounded query counts.
+- Comment serialization bulk-loads current email metadata only for referenced users, updates that metadata after an email change without rewriting or dirtying saved text, omits deleted users, and never expands ordinary author records with email or management URLs.
 
 ### Notification and audit tests
 
@@ -253,15 +274,16 @@ Implementation is test-driven and covers the contract at five layers.
 ### Frontend unit tests
 
 - Query recognition, the 64-unit client limit, 200 ms debounce, server-result selection, and exact always-rendered hidden-field payloads work for comments and replies.
-- Range reconciliation shifts, retains, or drops occurrences for edits before, after, and through labels.
-- Duplicate names, repeated targets, emoji, multiline input, selected-range paste, cut, native text undo/redo, the declared non-restoration of dropped mention identity, and cancel/hydration behavior are covered.
+- Mini Draftail hydrates plain text plus occurrence JSON into `MENTION` entities, renders no formatting toolbar, and extracts the same plain text plus absolute UTF-16 occurrence ranges.
+- Draft.js entity tracking shifts, retains, or removes occurrences for edits before, after, and through labels; partial entity text never survives as a forged mention.
+- Duplicate names, repeated targets, emoji, multiline input, selected-range paste, cut, plain-text paste, text-and-entity undo/redo, current-email metadata changes, and cancel/hydration behavior are covered.
 - Keyboard navigation, Escape, ordinary Tab behavior, pointer selection, ARIA state, status messages, and forced-colors classes are deterministic.
 - Debounce, abort, stale and out-of-order responses, malformed responses, composition, blur, deletion, and unmount cannot insert stale data or leak requests.
 
 ### Browser and regression tests
 
 - Keyboard-only users can create, edit, and remove mentions in a comment and reply, save, autosave, reload, and see the same result.
-- Multiline text, emoji, selection replacement, paste, caret movement, and character undo behave as native textarea operations, with the specified sidecar non-restoration behavior asserted separately.
+- The toolbar-free Mini Draftail editor highlights mention entities inline while preserving multiline text, emoji, selection replacement, plain-text paste, caret movement, IME composition, and text/entity undo behavior.
 - Automated accessibility checks run with the popup closed, loading, empty, and populated.
 - The comment mention Playwright regression runs in Chromium in automated verification. Before the pull request is published, the same keyboard, multiline, paste, emoji, reload, and popup-accessibility scenario is run manually in current Firefox and the result is recorded in the pull request. WebKit/Safari remains an encouraged reviewer check rather than a release gate because the repository's current integration setup is Chromium-only.
 
@@ -285,6 +307,6 @@ The implementation is ready when:
 2. Existing page create/edit, comment, reply, notification, audit, and permission suites pass unchanged or with intentional assertions added on both branches.
 3. Django 5.2 and Django 6.0 pass on 7.4, and each branch's UUID email-user configuration passes.
 4. Frontend type checking, linting, formatting, style linting, production build, Chromium mention regression, and Axe checks pass on both branches; the required primary-branch Firefox manual scenario and version are recorded.
-5. Migration checks pass on both branches and produce the same schema operations without database-specific behavior outside Wagtail's supported contract.
+5. Migration checks pass on both branches and produce the same JSON-field and inverse-index schema operations without database-specific behavior outside Wagtail's supported contract.
 6. The retained compatibility branch and committed report contain the recorded OIDs, patch checksum, commit/diff comparison, exhaustive adaptation list, and command output required to reproduce the compatibility conclusion.
 7. A final diff and commit-history review confirms PR 1 remains based on current upstream `main`, contains no unrelated commits, leaves core-committer release files unchanged while providing suggested copy in the PR, and uses the required pull request template and AI disclosure; the compatibility report confirms that the 7.4 runtime/test backport differs only at the declared compatibility seams.
