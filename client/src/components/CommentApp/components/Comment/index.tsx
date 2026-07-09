@@ -32,6 +32,7 @@ async function saveComment(comment: Comment, store: Store) {
       updateComment(comment.localId, {
         mode: 'default',
         text: comment.newText,
+        // Commit the working mention list only when the comment text is saved.
         mentions: comment.newMentions,
         remoteId: comment.remoteId,
         author: comment.author,
@@ -207,6 +208,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
     };
 
     const onChangeMentions = (mentions: Comment['mentions']) => {
+      // Keep mention edits separate from saved mention state until submit.
       store.dispatch(
         updateComment(comment.localId, {
           newMentions: mentions,
@@ -282,6 +284,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
     };
 
     const onChangeMentions = (mentions: Comment['mentions']) => {
+      // Keep mention edits separate from saved mention state until submit.
       store.dispatch(
         updateComment(comment.localId, {
           newMentions: mentions,
@@ -531,6 +534,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           updateComment(comment.localId, {
             mode: 'editing',
             newText: comment.text,
+            // Seed the editor with existing mentions so unchanged mentions are retained.
             newMentions: comment.mentions,
           }),
         );

@@ -32,6 +32,7 @@ export const selectIsDirty = createSelector(
   selectRemoteCommentCount,
   (comments, remoteCommentCount) => {
     const mentionIdsChanged = (original: Mention[], current: Mention[]) => {
+      // Compare ids only; label/email changes should not make the comment dirty.
       const originalIds = original.map((mention) => String(mention.id)).sort();
       const currentIds = current.map((mention) => String(mention.id)).sort();
       return originalIds.join('\n') !== currentIds.join('\n');

@@ -117,6 +117,10 @@ export interface Comment {
   text: string;
   originalText: string;
   newText: string;
+  /**
+   * Mirrors the text fields: mentions is saved state, originalMentions is used
+   * for dirty checks, and newMentions is the working copy while editing.
+   */
   mentions: Mention[];
   originalMentions: Mention[];
   newMentions: Mention[];

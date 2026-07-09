@@ -10,6 +10,7 @@ interface MentionTextAreaProps extends TextAreaProps {
 }
 
 const getMentionQuery = (value: string, cursorPosition: number) => {
+  // Only trigger suggestions while the cursor is inside an unfinished @token.
   const valueBeforeCursor = value.slice(0, cursorPosition);
   const match = /(^|\s)@([^\s@]*)$/.exec(valueBeforeCursor);
 
@@ -51,6 +52,7 @@ export default function MentionTextArea({
       return undefined;
     }
 
+    // Cancel stale suggestion requests as the user keeps typing.
     const controller = new AbortController();
     const url = new URL(mentionSuggestionsUrl, window.location.origin);
     url.searchParams.set('q', mentionQuery.query);
@@ -73,6 +75,7 @@ export default function MentionTextArea({
   }, [mentionSuggestionsUrl, mentionQuery?.query]);
 
   const updateMentionsForText = (nextValue: string) => {
+    // If the plain-text @email token is removed, drop the stored mention too.
     onMentionsChange?.(
       mentions.filter((mention) => nextValue.includes(`@${mention.email}`)),
     );
@@ -87,6 +90,7 @@ export default function MentionTextArea({
   const selectMention = (mention: Mention) => {
     if (!mentionQuery) return;
 
+    // Insert a readable @email token, but keep the exact user id in state.
     const beforeMention = value.slice(0, mentionQuery.start);
     const afterMention = value.slice(
       textAreaRef.current?.selectionStart ?? value.length,
@@ -111,6 +115,7 @@ export default function MentionTextArea({
       return;
     }
 
+    // Keep keyboard navigation inside the typeahead suggestions.
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       setHighlightedIndex((highlightedIndex + 1) % suggestions.length);

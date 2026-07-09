@@ -144,6 +144,7 @@ export function CommentFormComponent({
         value={comment.text}
         prefix={fullPrefix}
       />
+      {/* Submit stable user ids; the visible comment text stays plain @email tokens. */}
       <PrefixedHiddenInput
         fieldName="mentions"
         value={JSON.stringify(

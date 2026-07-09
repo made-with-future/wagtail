@@ -15,6 +15,7 @@ export default function CommentText({
   let cursor = 0;
 
   const findNextMention = (startIndex: number) => {
+    // Find the next stored @email token so only known mentions become links.
     let nextMention: {
       mention: Mention;
       token: string;

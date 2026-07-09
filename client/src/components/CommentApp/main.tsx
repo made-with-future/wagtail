@@ -91,6 +91,7 @@ const getMention = (
   >,
   id: any,
 ): Mention => {
+  // Mentions share author metadata so display details stay server-authoritative.
   const author = getAuthor(authors, id);
 
   return {
@@ -365,6 +366,7 @@ export class CommentApp {
               text: comment.text,
               deleted: comment.deleted,
               resolved: comment.resolved,
+              // Server sends mention ids; hydrate them into display-ready objects.
               mentions: (comment.mentions || []).map((mentionedUserId) =>
                 getMention(authors, mentionedUserId),
               ),
