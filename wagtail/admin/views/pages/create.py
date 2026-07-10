@@ -3,6 +3,7 @@ from urllib.parse import quote, urlencode
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import PermissionDenied
+from django.db import transaction
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
@@ -15,6 +16,12 @@ from django.views.generic.base import View
 
 from wagtail.admin import messages
 from wagtail.admin.action_menu import PageActionMenu
+from wagtail.admin.comment_mentions import InvalidMentionTargets
+from wagtail.admin.comment_notifications import schedule_comment_notifications
+from wagtail.admin.commenting import (
+    collect_commenting_changes,
+    log_commenting_changes,
+)
 from wagtail.admin.telepath import JSContext
 from wagtail.admin.ui.autosave import AutosaveIndicator
 from wagtail.admin.ui.components import MediaContainer
@@ -210,6 +217,66 @@ class CreateView(
     def form_valid(self, form):
         return self.action_method()
 
+    def sync_commenting_changes(self):
+        comments_formset = self.form.formsets.get("comments")
+        if comments_formset is None:
+            return None
+        comments_formset.sync_mention_lookups()
+        return collect_commenting_changes(comments_formset)
+
+    def rebuild_form_after_invalid_mentions(self):
+        comments_formset = self.form.formsets["comments"]
+        invalid_mentions = {
+            mention_form.prefix: (
+                list(mention_form.invalid_target_mentions),
+                list(mention_form.errors.as_data()["mentions"]),
+            )
+            for mention_form in comments_formset.iter_mention_forms(
+                include_deleted=True
+            )
+            if hasattr(mention_form, "invalid_target_mentions")
+        }
+        owner = self.page.owner
+        locale = self.page.locale
+
+        self.parent_page.refresh_from_db()
+        self.page = self.page_class(owner=owner)
+        self.page.locale = locale
+        self.page.path = ""
+        self.page.depth = 0
+        self.subscription = PageSubscription(
+            page=self.page,
+            user=self.request.user,
+            comment_notifications=True,
+        )
+        self.form = self.form_class(
+            self.request.POST,
+            self.request.FILES,
+            instance=self.page,
+            subscription=self.subscription,
+            parent_page=self.parent_page,
+            for_user=self.request.user,
+        )
+        if self.action_name == "save":
+            self.form.defer_required_fields()
+        self.form.is_valid()
+        self.form.restore_required_fields()
+
+        mention_forms = {
+            mention_form.prefix: mention_form
+            for mention_form in self.form.formsets["comments"].iter_mention_forms(
+                include_deleted=True
+            )
+        }
+        for prefix, (occurrences, errors) in invalid_mentions.items():
+            mention_form = mention_forms[prefix]
+            mention_form.invalid_target_mentions = occurrences
+            for error in errors:
+                mention_form.add_error("mentions", error)
+            mention_form.cleaned_data["mentions"] = occurrences
+
+        return self.form_invalid(self.form)
+
     def get_page_subtitle(self):
         return self.page_class.get_verbose_name()
 
@@ -261,23 +328,43 @@ class CreateView(
             )
 
     def save_action(self):
-        self.page = self.form.save(commit=False)
-        self.page.live = False
+        try:
+            with transaction.atomic():
+                self.page = self.form.save(commit=False)
+                self.page.live = False
 
-        # Save page
-        self.parent_page.add_child(instance=self.page)
+                # Save page
+                self.parent_page.add_child(instance=self.page)
+                comments_formset = self.form.formsets.get("comments")
+                if comments_formset is not None:
+                    comments_formset.revalidate_new_mentions_for_page(self.page)
 
-        # Set page privacy setting
-        self.set_default_privacy_setting()
+                # Set page privacy setting
+                self.set_default_privacy_setting()
 
-        # Save revision
-        revision = self.page.save_revision(
-            user=self.request.user, log_action=True, clean=False
-        )
+                # Save revision
+                revision = self.page.save_revision(
+                    user=self.request.user, log_action=True, clean=False
+                )
 
-        # Save subscription settings
-        self.subscription.page = self.page
-        self.subscription.save()
+                # Save subscription settings
+                self.subscription.page = self.page
+                self.subscription.save()
+
+                changes = self.sync_commenting_changes()
+                if changes is not None:
+                    log_commenting_changes(
+                        changes=changes,
+                        revision=revision,
+                        actor=self.request.user,
+                    )
+                    schedule_comment_notifications(
+                        page=self.page,
+                        editor=self.request.user,
+                        changes=changes,
+                    )
+        except InvalidMentionTargets:
+            return self.rebuild_form_after_invalid_mentions()
 
         if not self.expects_json_response:
             # Notification
@@ -316,27 +403,50 @@ class CreateView(
             return self.redirect_and_remain()
 
     def publish_action(self):
-        self.page = self.form.save(commit=False)
+        try:
+            with transaction.atomic():
+                self.page = self.form.save(commit=False)
 
-        # Save page
-        self.parent_page.add_child(instance=self.page)
+                # Save page
+                self.parent_page.add_child(instance=self.page)
+                comments_formset = self.form.formsets.get("comments")
+                if comments_formset is not None:
+                    comments_formset.revalidate_new_mentions_for_page(self.page)
 
-        # Set page privacy setting
-        self.set_default_privacy_setting()
+                # Set page privacy setting
+                self.set_default_privacy_setting()
 
-        # Save revision
-        revision = self.page.save_revision(user=self.request.user, log_action=True)
+                # Save revision
+                revision = self.page.save_revision(
+                    user=self.request.user, log_action=True
+                )
 
-        # Save subscription settings
-        self.subscription.page = self.page
-        self.subscription.save()
+                # Save subscription settings
+                self.subscription.page = self.page
+                self.subscription.save()
 
-        # Publish
-        response = self.run_hook("before_publish_page", self.request, self.page)
-        if response:
-            return response
+                changes = self.sync_commenting_changes()
 
-        revision.publish(user=self.request.user)
+                # Publish
+                response = self.run_hook("before_publish_page", self.request, self.page)
+                if response:
+                    return response
+
+                revision.publish(user=self.request.user)
+
+                if changes is not None:
+                    log_commenting_changes(
+                        changes=changes,
+                        revision=revision,
+                        actor=self.request.user,
+                    )
+                    schedule_comment_notifications(
+                        page=self.page,
+                        editor=self.request.user,
+                        changes=changes,
+                    )
+        except InvalidMentionTargets:
+            return self.rebuild_form_after_invalid_mentions()
 
         # get a fresh copy so that any changes coming from revision.publish() are passed on
         self.page.refresh_from_db()
@@ -372,25 +482,49 @@ class CreateView(
         return self.redirect_away()
 
     def submit_action(self):
-        self.page = self.form.save(commit=False)
-        self.page.live = False
+        try:
+            with transaction.atomic():
+                self.page = self.form.save(commit=False)
+                self.page.live = False
 
-        # Save page
-        self.parent_page.add_child(instance=self.page)
+                # Save page
+                self.parent_page.add_child(instance=self.page)
+                comments_formset = self.form.formsets.get("comments")
+                if comments_formset is not None:
+                    comments_formset.revalidate_new_mentions_for_page(self.page)
 
-        # Set page privacy setting
-        self.set_default_privacy_setting()
+                # Set page privacy setting
+                self.set_default_privacy_setting()
 
-        # Save revision
-        self.page.save_revision(user=self.request.user, log_action=True)
+                # Save revision
+                revision = self.page.save_revision(
+                    user=self.request.user, log_action=True
+                )
 
-        # Submit
-        workflow = self.page.get_workflow()
-        workflow.start(self.page, self.request.user)
+                # Save subscription settings
+                self.subscription.page = self.page
+                self.subscription.save()
 
-        # Save subscription settings
-        self.subscription.page = self.page
-        self.subscription.save()
+                changes = self.sync_commenting_changes()
+                if changes is not None:
+                    log_commenting_changes(
+                        changes=changes,
+                        revision=revision,
+                        actor=self.request.user,
+                    )
+
+                # Submit
+                workflow = self.page.get_workflow()
+                workflow.start(self.page, self.request.user)
+
+                if changes is not None:
+                    schedule_comment_notifications(
+                        page=self.page,
+                        editor=self.request.user,
+                        changes=changes,
+                    )
+        except InvalidMentionTargets:
+            return self.rebuild_form_after_invalid_mentions()
 
         # Notification
         buttons = []

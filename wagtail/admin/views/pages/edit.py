@@ -2,10 +2,8 @@ import json
 from urllib.parse import quote
 
 from django.conf import settings
-from django.contrib.auth import get_user_model
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
-from django.db.models import Prefetch, Q
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
@@ -18,11 +16,11 @@ from django.views.generic.base import View
 from wagtail.actions.publish_page_revision import PublishPageRevisionAction
 from wagtail.admin import messages
 from wagtail.admin.action_menu import PageActionMenu
+from wagtail.admin.comment_notifications import schedule_comment_notifications
 from wagtail.admin.commenting import (
     collect_commenting_changes,
     log_commenting_changes,
 )
-from wagtail.admin.mail import send_notification
 from wagtail.admin.models import EditingSession
 from wagtail.admin.telepath import JSContext
 from wagtail.admin.ui.autosave import AutosaveIndicator
@@ -41,9 +39,6 @@ from wagtail.admin.views.generic.base import WagtailAdminTemplateMixin
 from wagtail.exceptions import PageClassNotFoundError
 from wagtail.locks import BasicLock, ScheduledForPublishLock, WorkflowLock
 from wagtail.models import (
-    COMMENTS_RELATION_NAME,
-    Comment,
-    CommentReply,
     Page,
     PageSubscription,
     Revision,
@@ -95,130 +90,12 @@ class EditView(
     def get_commenting_changes(self):
         return collect_commenting_changes(self.form.formsets["comments"])
 
-    def send_commenting_notifications(self, changes):
-        """
-        Sends notifications about any changes to comments to anyone who is subscribed.
-        """
-        relevant_comment_ids = []
-        relevant_comment_ids.extend(comment.pk for comment in changes.resolved_comments)
-        relevant_comment_ids.extend(
-            comment.pk for comment, replies in changes.new_replies
-        )
-
-        # Skip if no changes were made
-        # Note: We don't email about edited comments so ignore those here
-        if (
-            not changes.new_comments
-            and not changes.deleted_comments
-            and not changes.resolved_comments
-            and not changes.new_replies
-        ):
-            return
-
-        # Get global page comment subscribers
-        subscribers = PageSubscription.objects.filter(
-            page=self.page, comment_notifications=True
-        ).select_related("user")
-        global_recipient_users = [
-            subscriber.user
-            for subscriber in subscribers
-            if subscriber.user != self.request.user
-        ]
-
-        # Get subscribers to individual threads
-        replies = CommentReply.objects.filter(comment_id__in=relevant_comment_ids)
-        comments = Comment.objects.filter(id__in=relevant_comment_ids)
-        thread_users = (
-            get_user_model()
-            .objects.exclude(pk=self.request.user.pk)
-            .exclude(pk__in=subscribers.values_list("user_id", flat=True))
-            .filter(
-                Q(comment_replies__comment_id__in=relevant_comment_ids)
-                | Q(**{("%s__pk__in" % COMMENTS_RELATION_NAME): relevant_comment_ids})
-            )
-            .prefetch_related(
-                Prefetch("comment_replies", queryset=replies),
-                Prefetch(COMMENTS_RELATION_NAME, queryset=comments),
-            )
-        )
-
-        # Skip if no recipients
-        if not (global_recipient_users or thread_users):
-            return
-        thread_users = [
-            (
-                user,
-                set(
-                    list(user.comment_replies.values_list("comment_id", flat=True))
-                    + list(
-                        getattr(user, COMMENTS_RELATION_NAME).values_list(
-                            "pk", flat=True
-                        )
-                    )
-                ),
-            )
-            for user in thread_users
-        ]
-
-        mailed_users = set()
-
-        for current_user, current_threads in thread_users:
-            # We are trying to avoid calling send_notification for each user for performance reasons
-            # so group the users receiving the same thread notifications together here
-            if current_user in mailed_users:
-                continue
-            users = [current_user]
-            mailed_users.add(current_user)
-            for user, threads in thread_users:
-                if user not in mailed_users and threads == current_threads:
-                    users.append(user)
-                    mailed_users.add(user)
-            send_notification(
-                users,
-                "updated_comments",
-                {
-                    "page": self.page,
-                    "editor": self.request.user,
-                    "new_comments": [
-                        comment
-                        for comment in changes.new_comments
-                        if comment.pk in threads
-                    ],
-                    "resolved_comments": [
-                        comment
-                        for comment in changes.resolved_comments
-                        if comment.pk in threads
-                    ],
-                    "deleted_comments": [],
-                    "replied_comments": [
-                        {
-                            "comment": comment,
-                            "replies": replies,
-                        }
-                        for comment, replies in changes.new_replies
-                        if comment.pk in threads
-                    ],
-                },
-            )
-
-        return send_notification(
-            global_recipient_users,
-            "updated_comments",
-            {
-                "page": self.page,
-                "editor": self.request.user,
-                "new_comments": changes.new_comments,
-                "resolved_comments": changes.resolved_comments,
-                "deleted_comments": changes.deleted_comments,
-                "replied_comments": [
-                    {
-                        "comment": comment,
-                        "replies": replies,
-                    }
-                    for comment, replies in changes.new_replies
-                ],
-            },
-        )
+    def sync_commenting_changes(self):
+        comments_formset = self.form.formsets.get("comments")
+        if comments_formset is None:
+            return None
+        comments_formset.sync_mention_lookups()
+        return self.get_commenting_changes()
 
     def log_commenting_changes(self, changes, revision):
         return log_commenting_changes(
@@ -566,6 +443,15 @@ class EditView(
                     overwrite_revision=overwrite_revision,
                     clean=False,
                 )
+
+                changes = self.sync_commenting_changes()
+                if changes is not None:
+                    self.log_commenting_changes(changes, revision)
+                    schedule_comment_notifications(
+                        page=self.page,
+                        editor=self.request.user,
+                        changes=changes,
+                    )
         except PermissionDenied as e:
             # The revision passed to overwrite_revision was not valid
             if self.expects_json_response:
@@ -577,11 +463,6 @@ class EditView(
 
         if not self.expects_json_response:
             self.add_save_confirmation_message()
-
-        if self.has_content_changes and "comments" in self.form.formsets:
-            changes = self.get_commenting_changes()
-            self.log_commenting_changes(changes, revision)
-            self.send_commenting_notifications(changes)
 
         response = self.run_hook("after_edit_page", self.request, self.page)
         if response:
@@ -609,35 +490,40 @@ class EditView(
             return self.redirect_and_remain()
 
     def publish_action(self):
-        self.page = self.form.save(commit=not self.page.live)
-        self.subscription.save()
+        with transaction.atomic():
+            self.page = self.form.save(commit=not self.page.live)
+            self.subscription.save()
 
-        # Save revision
-        revision = self.page.save_revision(
-            user=self.request.user,
-            log_action=True,  # Always log the new revision on edit
-            previous_revision=self.previous_revision,
-        )
+            # Save revision
+            revision = self.page.save_revision(
+                user=self.request.user,
+                log_action=True,  # Always log the new revision on edit
+                previous_revision=self.previous_revision,
+            )
+            changes = self.sync_commenting_changes()
 
-        # store submitted go_live_at for messaging below
-        go_live_at = self.page.go_live_at
+            # store submitted go_live_at for messaging below
+            go_live_at = self.page.go_live_at
 
-        response = self.run_hook("before_publish_page", self.request, self.page)
-        if response:
-            return response
+            response = self.run_hook("before_publish_page", self.request, self.page)
+            if response:
+                return response
 
-        action = PublishPageRevisionAction(
-            revision,
-            user=self.request.user,
-            changed=self.has_content_changes,
-            previous_revision=self.previous_revision,
-        )
-        action.execute(skip_permission_checks=True)
+            action = PublishPageRevisionAction(
+                revision,
+                user=self.request.user,
+                changed=self.has_content_changes,
+                previous_revision=self.previous_revision,
+            )
+            action.execute(skip_permission_checks=True)
 
-        if self.has_content_changes and "comments" in self.form.formsets:
-            changes = self.get_commenting_changes()
-            self.log_commenting_changes(changes, revision)
-            self.send_commenting_notifications(changes)
+            if changes is not None:
+                self.log_commenting_changes(changes, revision)
+                schedule_comment_notifications(
+                    page=self.page,
+                    editor=self.request.user,
+                    changes=changes,
+                )
 
         # Need to reload the page because the URL may have changed, and we
         # need the up-to-date URL for the "View Live" button.
@@ -705,31 +591,37 @@ class EditView(
         return self.redirect_away()
 
     def submit_action(self):
-        self.page = self.form.save(commit=not self.page.live)
-        self.subscription.save()
+        with transaction.atomic():
+            self.page = self.form.save(commit=not self.page.live)
+            self.subscription.save()
 
-        # Save revision
-        revision = self.page.save_revision(
-            user=self.request.user,
-            log_action=True,  # Always log the new revision on edit
-            previous_revision=self.previous_revision,
-        )
+            # Save revision
+            revision = self.page.save_revision(
+                user=self.request.user,
+                log_action=True,  # Always log the new revision on edit
+                previous_revision=self.previous_revision,
+            )
+            changes = self.sync_commenting_changes()
+            if changes is not None:
+                self.log_commenting_changes(changes, revision)
 
-        if self.has_content_changes and "comments" in self.form.formsets:
-            changes = self.get_commenting_changes()
-            self.log_commenting_changes(changes, revision)
-            self.send_commenting_notifications(changes)
+            if (
+                self.workflow_state
+                and self.workflow_state.status == WorkflowState.STATUS_NEEDS_CHANGES
+            ):
+                # If the workflow was in the needs changes state, resume the existing workflow on submission
+                self.workflow_state.resume(self.request.user)
+            else:
+                # Otherwise start a new workflow
+                workflow = self.page.get_workflow()
+                workflow.start(self.page, self.request.user)
 
-        if (
-            self.workflow_state
-            and self.workflow_state.status == WorkflowState.STATUS_NEEDS_CHANGES
-        ):
-            # If the workflow was in the needs changes state, resume the existing workflow on submission
-            self.workflow_state.resume(self.request.user)
-        else:
-            # Otherwise start a new workflow
-            workflow = self.page.get_workflow()
-            workflow.start(self.page, self.request.user)
+            if changes is not None:
+                schedule_comment_notifications(
+                    page=self.page,
+                    editor=self.request.user,
+                    changes=changes,
+                )
 
         message = _("Page '%(page_title)s' has been submitted for moderation.") % {
             "page_title": self.page.get_admin_display_title()
@@ -752,26 +644,32 @@ class EditView(
         return self.redirect_away()
 
     def restart_workflow_action(self):
-        self.page = self.form.save(commit=not self.page.live)
-        self.subscription.save()
+        with transaction.atomic():
+            self.page = self.form.save(commit=not self.page.live)
+            self.subscription.save()
 
-        # save revision
-        revision = self.page.save_revision(
-            user=self.request.user,
-            log_action=True,  # Always log the new revision on edit
-            previous_revision=self.previous_revision,
-        )
+            # save revision
+            revision = self.page.save_revision(
+                user=self.request.user,
+                log_action=True,  # Always log the new revision on edit
+                previous_revision=self.previous_revision,
+            )
+            changes = self.sync_commenting_changes()
+            if changes is not None:
+                self.log_commenting_changes(changes, revision)
 
-        if self.has_content_changes and "comments" in self.form.formsets:
-            changes = self.get_commenting_changes()
-            self.log_commenting_changes(changes, revision)
-            self.send_commenting_notifications(changes)
+            # cancel workflow
+            self.workflow_state.cancel(user=self.request.user)
+            # start new workflow
+            workflow = self.page.get_workflow()
+            workflow.start(self.page, self.request.user)
 
-        # cancel workflow
-        self.workflow_state.cancel(user=self.request.user)
-        # start new workflow
-        workflow = self.page.get_workflow()
-        workflow.start(self.page, self.request.user)
+            if changes is not None:
+                schedule_comment_notifications(
+                    page=self.page,
+                    editor=self.request.user,
+                    changes=changes,
+                )
 
         message = _("Workflow on page '%(page_title)s' has been restarted.") % {
             "page_title": self.page.get_admin_display_title()
@@ -794,34 +692,41 @@ class EditView(
         return self.redirect_away()
 
     def perform_workflow_action(self):
-        self.page = self.form.save(commit=not self.page.live)
-        self.subscription.save()
+        with transaction.atomic():
+            self.page = self.form.save(commit=not self.page.live)
+            self.subscription.save()
 
-        if self.has_content_changes:
-            # Save revision
-            revision = self.page.save_revision(
-                user=self.request.user,
-                log_action=True,  # Always log the new revision on edit
-                previous_revision=(
-                    self.previous_revision if self.is_reverting else None
-                ),
+            changes = None
+            if self.has_content_changes:
+                # Save revision
+                revision = self.page.save_revision(
+                    user=self.request.user,
+                    log_action=True,  # Always log the new revision on edit
+                    previous_revision=(
+                        self.previous_revision if self.is_reverting else None
+                    ),
+                )
+                changes = self.sync_commenting_changes()
+                if changes is not None:
+                    self.log_commenting_changes(changes, revision)
+
+            extra_workflow_data_json = self.request.POST.get(
+                "workflow-action-extra-data", "{}"
+            )
+            extra_workflow_data = json.loads(extra_workflow_data_json)
+            self.page.current_workflow_task.on_action(
+                self.page.current_workflow_task_state,
+                self.request.user,
+                self.workflow_action,
+                **extra_workflow_data,
             )
 
-            if "comments" in self.form.formsets:
-                changes = self.get_commenting_changes()
-                self.log_commenting_changes(changes, revision)
-                self.send_commenting_notifications(changes)
-
-        extra_workflow_data_json = self.request.POST.get(
-            "workflow-action-extra-data", "{}"
-        )
-        extra_workflow_data = json.loads(extra_workflow_data_json)
-        self.page.current_workflow_task.on_action(
-            self.page.current_workflow_task_state,
-            self.request.user,
-            self.workflow_action,
-            **extra_workflow_data,
-        )
+            if changes is not None:
+                schedule_comment_notifications(
+                    page=self.page,
+                    editor=self.request.user,
+                    changes=changes,
+                )
 
         self.add_save_confirmation_message()
 
@@ -833,21 +738,25 @@ class EditView(
         return self.redirect_away()
 
     def cancel_workflow_action(self):
-        self.workflow_state.cancel(user=self.request.user)
-        self.page = self.form.save(commit=not self.page.live)
-        self.subscription.save()
+        with transaction.atomic():
+            self.workflow_state.cancel(user=self.request.user)
+            self.page = self.form.save(commit=not self.page.live)
+            self.subscription.save()
 
-        # Save revision
-        revision = self.page.save_revision(
-            user=self.request.user,
-            log_action=True,  # Always log the new revision on edit
-            previous_revision=self.previous_revision,
-        )
-
-        if self.has_content_changes and "comments" in self.form.formsets:
-            changes = self.get_commenting_changes()
-            self.log_commenting_changes(changes, revision)
-            self.send_commenting_notifications(changes)
+            # Save revision
+            revision = self.page.save_revision(
+                user=self.request.user,
+                log_action=True,  # Always log the new revision on edit
+                previous_revision=self.previous_revision,
+            )
+            changes = self.sync_commenting_changes()
+            if changes is not None:
+                self.log_commenting_changes(changes, revision)
+                schedule_comment_notifications(
+                    page=self.page,
+                    editor=self.request.user,
+                    changes=changes,
+                )
 
         # Notifications
         self.add_cancel_workflow_confirmation_message()
@@ -874,10 +783,22 @@ class EditView(
             target_url += "?next=%s" % quote(self.next_url)
         return redirect(target_url)
 
+    def has_comment_mention_errors(self):
+        comments_formset = self.form.formsets.get("comments")
+        if comments_formset is None:
+            return False
+        return any(
+            "mentions" in mention_form.errors
+            for mention_form in comments_formset.iter_mention_forms(
+                include_deleted=True
+            )
+        )
+
     def form_invalid(self, form):
         # even if the page is locked due to not having permissions, the original submitter can still cancel the workflow
-        if self.is_cancelling_workflow:
-            self.workflow_state.cancel(user=self.request.user)
+        if self.is_cancelling_workflow and not self.has_comment_mention_errors():
+            with transaction.atomic():
+                self.workflow_state.cancel(user=self.request.user)
             self.add_cancel_workflow_confirmation_message()
 
             # Refresh the lock object as now WorkflowLock no longer applies

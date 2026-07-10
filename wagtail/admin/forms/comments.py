@@ -220,6 +220,9 @@ class CommentFormSet(BaseChildFormSet):
                 form.add_error("mentions", form.mention_validation_error)
             raise
 
+    def revalidate_new_mentions_for_page(self, page):
+        self.validate_new_mentions(page_mention_candidates(page))
+
     def sync_mention_lookups(self):
         deleted_comment_forms = set(self.deleted_forms)
         for form in self.forms:
