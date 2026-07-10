@@ -79,6 +79,26 @@ const editorState = (wrapper: ReactWrapper) =>
 const editableElement = (wrapper: ReactWrapper) =>
   wrapper.getDOMNode().querySelector('[contenteditable="true"]') as HTMLElement;
 
+const chooseFirstSuggestion = (wrapper: ReactWrapper) => {
+  const state = editorState(wrapper);
+  changeEditor(
+    wrapper,
+    EditorState.forceSelection(state, select(firstBlock(state), 3)),
+  );
+  const capture = wrapper
+    .find('.comment__mention-input')
+    .prop('onKeyDownCapture') as React.KeyboardEventHandler;
+
+  act(() =>
+    capture({
+      key: 'Enter',
+      preventDefault: jest.fn(),
+      stopPropagation: jest.fn(),
+    } as unknown as React.KeyboardEvent),
+  );
+  wrapper.update();
+};
+
 beforeEach(() => {
   close.mockReset();
   useSuggestionsMock.mockReset();
@@ -222,6 +242,68 @@ test('metadata-only changes rerender mention decoration without rehydrating', ()
   expect(editorState(wrapper)).toBe(state);
   expect(wrapper.find('.comment__mention').prop('data-mention-email')).toBe(
     'new@example.com',
+  );
+});
+
+test('shows selected suggestion email before server metadata is available', () => {
+  useSuggestionsMock.mockReturnValue(
+    suggestionState({ status: 'ready', suggestions: [ada] }),
+  );
+  const wrapper = mount(<MentionEditor {...baseProps} value="@ad" />);
+
+  chooseFirstSuggestion(wrapper);
+
+  expect(wrapper.find('.comment__mention').prop('data-mention-email')).toBe(
+    'ada@example.com',
+  );
+});
+
+test('retains selected suggestion email through Draft undo and redo', () => {
+  useSuggestionsMock.mockReturnValue(
+    suggestionState({ status: 'ready', suggestions: [ada] }),
+  );
+  const wrapper = mount(<MentionEditor {...baseProps} value="@ad" />);
+  chooseFirstSuggestion(wrapper);
+
+  changeEditor(wrapper, EditorState.undo(editorState(wrapper)));
+  expect(wrapper.find('.comment__mention')).toHaveLength(0);
+
+  changeEditor(wrapper, EditorState.redo(editorState(wrapper)));
+  expect(wrapper.find('.comment__mention').prop('data-mention-email')).toBe(
+    'ada@example.com',
+  );
+});
+
+test('server metadata retires the selected email without changing editor state', () => {
+  useSuggestionsMock.mockReturnValue(
+    suggestionState({ status: 'ready', suggestions: [ada] }),
+  );
+  const onChange = jest.fn();
+  const wrapper = mount(
+    <MentionEditor {...baseProps} value="@ad" onChange={onChange} />,
+  );
+  chooseFirstSuggestion(wrapper);
+  const selectedState = editorState(wrapper);
+  expect(wrapper.find('.comment__mention').prop('data-mention-email')).toBe(
+    'ada@example.com',
+  );
+  onChange.mockClear();
+
+  wrapper.setProps({
+    mentionedUsers: { '7': { email: 'server@example.com' } },
+  });
+  wrapper.update();
+
+  expect(editorState(wrapper)).toBe(selectedState);
+  expect(onChange).not.toHaveBeenCalled();
+  expect(wrapper.find('.comment__mention').prop('data-mention-email')).toBe(
+    'server@example.com',
+  );
+
+  wrapper.setProps({ mentionedUsers: {} });
+  wrapper.update();
+  expect(wrapper.find('.comment__mention').prop('data-mention-email')).toBe(
+    undefined,
   );
 });
 

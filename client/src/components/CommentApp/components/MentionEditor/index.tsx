@@ -110,6 +110,9 @@ export default function MentionEditor({
   );
   const [composing, setComposing] = React.useState(false);
   const [highlightedIndex, setHighlightedIndex] = React.useState(0);
+  const [selectedMentionedUsers, setSelectedMentionedUsers] = React.useState<
+    Record<string, MentionedUser>
+  >({});
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const draftailRef = React.useRef<DraftailEditor | null>(null);
   const savedSelectionRef = React.useRef<SelectionState>(
@@ -129,6 +132,25 @@ export default function MentionEditor({
     setEditorState(nextState);
     setQuery(getMentionQueryFromEditorState(nextState));
   }, [value, mentionsSignature]);
+
+  React.useEffect(() => {
+    setSelectedMentionedUsers((current) => {
+      const hydratedUserIds = Object.keys(mentionedUsers).filter(
+        (userId) => current[userId] !== undefined,
+      );
+      if (hydratedUserIds.length === 0) return current;
+
+      return Object.fromEntries(
+        Object.entries(current).filter(
+          ([userId]) => mentionedUsers[userId] === undefined,
+        ),
+      );
+    });
+  }, [mentionedUsers]);
+  const displayedMentionedUsers = React.useMemo(
+    () => ({ ...selectedMentionedUsers, ...mentionedUsers }),
+    [mentionedUsers, selectedMentionedUsers],
+  );
 
   React.useEffect(() => {
     if (focusOnMount) draftailRef.current?.focus();
@@ -225,6 +247,10 @@ export default function MentionEditor({
         editorState,
         savedSelectionRef.current,
       );
+      setSelectedMentionedUsers((current) => ({
+        ...current,
+        [suggestion.id]: { email: suggestion.email },
+      }));
       updateEditorState(
         insertMentionSuggestion(selectedState, query, suggestion),
       );
@@ -283,7 +309,7 @@ export default function MentionEditor({
   }
 
   return (
-    <MentionedUsersContext.Provider value={mentionedUsers}>
+    <MentionedUsersContext.Provider value={displayedMentionedUsers}>
       <div
         className={['comment__mention-input', className]
           .filter(Boolean)
