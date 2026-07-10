@@ -867,7 +867,7 @@ comments_data["mentioned_users"] = {
 
 Resolve each exact occurrence ID through the configured PK field's prepared identity before building this map, so supported aliases may point to the same user without rewriting JSON. Keep the current editor plus actual comment/reply authors in `authors`, but never add a mention-only target there. Stringify all user IDs in the wire payload. Create serialization must not reverse an edit URL while `page.pk` is `None`; Task 5 supplies the correct two URL variants.
 
-The recorded Task 3 base already makes the prototype edit lifecycle unusable because that lifecycle treats the new JSON list as a related manager. Task 4 removes those relation helpers but intentionally does not create a temporary compatibility shim: Task 5 replaces the prototype endpoint, Tasks 6 and 7 replace change/delivery planning, and Task 8 removes the remaining `save_mentions()` / `notified_at` calls while integrating synchronization transactionally. Tasks 4 through 7 are coherent review slices, not standalone runnable edit-lifecycle checkpoints.
+The recorded Task 3 base already makes the prototype edit lifecycle unusable because that lifecycle treats the new JSON list as a related manager. Task 4 removes those relation helpers but intentionally does not create a temporary compatibility shim: Task 5 replaces the prototype endpoint, Task 6 replaces the change collector, removes the remaining `save_mentions()` / `notified_at` paths, and restores ordinary subscriber/thread notifications, Task 7 builds recipient-specific mention planning, and Task 8 installs lookup synchronization and the new planner transactionally across edit/create actions. Tasks 4 and 5 are coherent review slices rather than standalone runnable edit-lifecycle checkpoints; Task 6 restores the non-mention action baseline before direct mention delivery is integrated.
 
 - [ ] **Step 5: Verify form, privacy, UUID, and create-GET regressions**
 
@@ -900,11 +900,15 @@ git commit -m "Validate comment and reply mention payloads"
 **Files:**
 - Modify: `wagtail/admin/comment_mentions.py`
 - Create: `wagtail/admin/views/pages/comment_mentions.py`
+- Modify: `wagtail/admin/forms/comment_mentions.py`
 - Modify: `wagtail/admin/forms/comments.py`
 - Modify: `wagtail/admin/viewsets/pages.py`
 - Modify: `wagtail/admin/urls/pages.py`
+- Modify: `wagtail/admin/views/pages/edit.py`
 - Modify: `wagtail/admin/tests/test_comment_mentions.py`
+- Modify: `wagtail/admin/tests/test_edit_handlers.py`
 - Modify: `wagtail/admin/tests/pages/test_create_page.py`
+- Modify: `wagtail/admin/tests/pages/test_edit_page.py`
 
 **Interfaces:**
 - Consumes: normalized labels and form deltas.
@@ -932,7 +936,7 @@ self.assertJSONEqual(
 )
 ```
 
-Cover direct/inherited change permission, add-only future owner, add-only non-owner exclusion, superuser, direct/group `access_admin`, inactive target exclusion before slicing, comments disabled, missing `CommentPanel`, unauthorized requester, invalid parent/type/model, empty/65-unit query, current configured email, blank-email display-name/username fallback, overlong label truncation, deterministic username/PK order, ten-result cap, bounded query count, UUID IDs, and no edit URL/notification/permission keys.
+Cover direct/inherited change permission, add-only future owner, add-only non-owner exclusion, superuser, direct/group `access_admin`, inactive target exclusion before slicing, comments disabled, missing `CommentPanel`, unauthorized requester, stale saved and create content types, invalid parent/type/model, child-model viewset routing, empty/65-unit/33-emoji query bounds, current configured email, blank-email display-name/username fallback, overlong label truncation, deterministic username/PK order, ten-result cap, bounded query count, UUID IDs, and no edit URL/notification/permission keys. Add browser-shaped form tests for one bulk comment/reply resolution call, exact field error attribution, prepared primary keys, duplicate occurrence keys across different messages, sibling form errors, deleted messages, and invalid-target bound redisplay.
 
 - [ ] **Step 2: Verify the endpoints fail before implementation**
 
@@ -995,9 +999,9 @@ def future_page_mention_candidates(*, parent_page, owner):
 
 Use available model fields among `first_name`, `last_name`, `EMAIL_FIELD`, and `USERNAME_FIELD` for the `icontains` OR query; deduplicate field names before building `Q` objects, order by configured username field and PK, slice to ten after active/admin/page eligibility filters, then generate `id`, `label`, `email`, and optional distinct `username`. `email` comes from `current_mention_email(user)` and may be empty when `normalize_mention_label` used a fallback.
 
-Add four exact public interfaces. `comments_available_for_page_model(page_model: type[Page]) -> bool` returns false when `WAGTAILADMIN_COMMENTS_ENABLED` is false and otherwise tests for the `comments` formset on the model's edit-handler form class. `search_mention_candidates(candidates, query: str) -> list[dict[str, str]]` enforces the query contract, applies the available-model-field OR query, orders, slices, and maps the exact wire result. `resolve_new_mention_users(occurrences, candidates) -> dict[str, object]` fetches all canonical IDs in one candidates query and rejects a missing user or label that differs from `normalize_mention_label(user)`. Define a translated `InvalidMentionTargets(ValidationError)` carrying the invalid occurrence keys so callers can attach the generic validation message to the correct forms without exposing target details. `resolve_creatable_page_model(request, parent_page, app_label, model_name) -> type[Page]` applies the same content-type, Page-subclass, parent-permission, `creatable_subpage_models`, and `can_create_at` gates as `CreateView.dispatch`.
+Add four exact public interfaces. `comments_available_for_page_model(page_model: type[Page]) -> bool` returns false when `WAGTAILADMIN_COMMENTS_ENABLED` is false and otherwise tests for the `comments` formset on the model's edit-handler form class. `search_mention_candidates(candidates, query: str) -> list[dict[str, str]]` enforces the query contract, applies the available-model-field OR query, orders, slices, and maps the exact wire result. `resolve_new_mention_users(occurrences, candidates) -> tuple[object, ...]` fetches all prepared canonical IDs in one candidates query, returns users aligned with the input occurrence order, and rejects a missing user or label that differs from `normalize_mention_label(user)`. Define a translated `InvalidMentionTargets(ValidationError)` carrying only invalid input indices. Occurrence keys are unique only within one message, so neither resolver output nor failure attribution may use keys across the flattened comment/reply batch. `resolve_creatable_page_model(request, parent_page, app_label, model_name) -> type[Page]` applies the same content-type, Page-subclass, parent-permission, `creatable_subpage_models`, and `can_create_at` gates as `CreateView.dispatch`.
 
-Call `resolve_new_mention_users` once from `CommentFormSet.clean()` across non-deleted top-level and nested reply forms. Use `page_mention_candidates(self.instance)` when the page has a PK; otherwise use `future_page_mention_candidates(parent_page=self.parent_page, owner=self.for_user)`. Skip forms that already have errors and add any resolution failure to the exact form's `mentions` field rather than raising a formset-wide exception.
+Call `resolve_new_mention_users` once from a reusable `CommentFormSet.validate_new_mentions(candidates)` across non-deleted top-level and nested reply forms. Use `page_mention_candidates(self.instance)` when the page has a PK; otherwise use `future_page_mention_candidates(parent_page=self.parent_page, owner=self.for_user)`. Skip each form that already has errors without suppressing valid siblings, map invalid indices back to exact forms, retain the submitted occurrence list for bound redisplay, add the generic failure to each exact `mentions` field, and re-raise so the same helper can trigger Task 8's provisional-create rollback. `CommentFormSet.clean()` catches that exception after field errors have been attached.
 
 - [ ] **Step 4: Implement saved/create views and main routing**
 
@@ -1006,7 +1010,10 @@ Create `wagtail/admin/views/pages/comment_mentions.py` with:
 ```python
 class PageCommentMentionSuggestionsView(View):
     def dispatch(self, request, page_id, **kwargs):
-        self.page = get_object_or_404(Page, pk=page_id).specific
+        page = get_object_or_404(Page, pk=page_id)
+        if page.specific_class is None:
+            raise PageClassNotFoundError
+        self.page = page.specific
         if not self.page.permissions_for_user(request.user).can_edit():
             raise PermissionDenied
         if not comments_available_for_page_model(type(self.page)):
@@ -1058,7 +1065,7 @@ class CreatePageCommentMentionSuggestionsView(View):
 
 Saved dispatch must resolve the specific page, require requester `can_edit`, comments enabled, and a comment formset. Create dispatch must mirror `CreateView`: resolve content type/model/parent, require a `Page` subclass, `creatable_subpage_models`, `can_create_at`, and requester parent permission.
 
-On main, register viewset names `comment_mention_suggestions` and `create_comment_mention_suggestions`, classes, cached properties, and these URL names:
+Remove the superseded relation-era endpoint/helper from `views/pages/edit.py` and `forms/comments.py`. On main, register viewset names `comment_mention_suggestions` and `create_comment_mention_suggestions`, classes, cached properties, and these URL names. The create route must dispatch through the requested child app/model viewset rather than choosing from the parent page ID:
 
 ```python
 "wagtailadmin_pages:comment_mention_suggestions"
@@ -1074,10 +1081,15 @@ Run:
 ```bash
 python runtests.py -- \
   wagtail.admin.tests.test_comment_mentions \
-  wagtail.admin.tests.pages.test_create_page.TestCommenting.test_comments_enabled_by_default
+  wagtail.admin.tests.test_edit_handlers.TestCommentPanel \
+  wagtail.admin.tests.pages.test_create_page.TestCommenting.test_comments_enabled_by_default \
+  wagtail.admin.tests.pages.test_edit_page.TestCommenting.test_comment_mention_suggestions \
+  wagtail.admin.tests.pages.test_edit_page.TestCommenting.test_comment_mention_suggestions_require_page_edit_permission \
+  wagtail.admin.tests.pages.test_page_viewset.TestPageViewSetRegistry.test_as_view
 
 USE_EMAIL_USER_MODEL=yes python runtests.py -- \
-  wagtail.admin.tests.test_comment_mentions
+  wagtail.admin.tests.test_comment_mentions \
+  wagtail.admin.tests.test_edit_handlers.TestCommentPanel
 ```
 
 Expected: all PASS; create GET includes a resolvable create suggestion URL; query-count assertions stay fixed as candidate count grows.
@@ -1085,7 +1097,7 @@ Expected: all PASS; create GET includes a resolvable create suggestion URL; quer
 - [ ] **Step 6: Commit candidate services and routes**
 
 ```bash
-git add wagtail/admin/comment_mentions.py wagtail/admin/views/pages/comment_mentions.py wagtail/admin/forms/comments.py wagtail/admin/viewsets/pages.py wagtail/admin/urls/pages.py wagtail/admin/tests/test_comment_mentions.py wagtail/admin/tests/pages/test_create_page.py
+git add wagtail/admin/comment_mentions.py wagtail/admin/views/pages/comment_mentions.py wagtail/admin/forms/comment_mentions.py wagtail/admin/forms/comments.py wagtail/admin/viewsets/pages.py wagtail/admin/urls/pages.py wagtail/admin/views/pages/edit.py wagtail/admin/tests/test_comment_mentions.py wagtail/admin/tests/test_edit_handlers.py wagtail/admin/tests/pages/test_create_page.py wagtail/admin/tests/pages/test_edit_page.py
 git commit -m "Add permission-aware mention suggestions"
 ```
 
@@ -1128,7 +1140,7 @@ class CommentingChanges:
     mentions: list[MentionedMessage]
 ```
 
-Assert mention-only edits appear in `edited_comments`/`edited_replies`, added/removed entries are paired to the exact message, and audit JSON is:
+Assert mention-only edits appear in `edited_comments`/`edited_replies`, added/removed entries are paired to the exact message by object identity, deleted parent/reply forms contribute no mention reason, formset order is retained, collection performs no queries, and the same occurrence UUID may be reused by different messages without collision. Audit JSON is:
 
 ```json
 "mentions": {
@@ -1155,6 +1167,9 @@ Create:
 
 ```python
 def collect_commenting_changes(comments_formset) -> CommentingChanges:
+    new_comments = list(comments_formset.new_objects)
+    deleted_comments = list(comments_formset.deleted_objects)
+    changed_comments = list(comments_formset.changed_objects)
     mention_changes = []
     deleted_comment_forms = set(comments_formset.deleted_forms)
     for comment_form in comments_formset.forms:
@@ -1183,10 +1198,10 @@ def collect_commenting_changes(comments_formset) -> CommentingChanges:
                 )
 
     return CommentingChanges(
-        new_comments=list(comments_formset.new_objects),
-        deleted_comments=list(comments_formset.deleted_objects),
-        resolved_comments=get_resolved_comments(comments_formset.changed_objects),
-        edited_comments=get_edited_comments(comments_formset.changed_objects),
+        new_comments=new_comments,
+        deleted_comments=deleted_comments,
+        resolved_comments=get_resolved_comments(changed_comments),
+        edited_comments=get_edited_comments(changed_comments),
         new_replies=get_new_replies(comments_formset.forms),
         deleted_replies=get_deleted_replies(comments_formset.forms),
         edited_replies=get_edited_replies(comments_formset.forms),
@@ -1236,7 +1251,7 @@ def log_commenting_changes(*, changes, revision, actor) -> None:
             reply.log_delete(page_revision=revision, user=actor)
 ```
 
-The collector must inspect `new_objects`, `deleted_objects`, and `changed_objects` once, then attach each form's `mention_changes`; no model queries may rediscover the delta after save.
+The collector must snapshot `new_objects`, `deleted_objects`, and `changed_objects` once, then attach each form's `mention_changes`; no model queries may rediscover the delta after save. `_changes_for()` must match the exact `Comment` or `CommentReply` object by identity rather than by occurrence key, user ID, equality, or primary key alone.
 
 Define the collection helpers with these exact semantics:
 
@@ -1283,9 +1298,11 @@ def get_edited_replies(comment_forms):
 
 Extend `Comment._log` and `CommentReply._log` with optional `mention_changes`, including only stable `key`/`user_id` values. Do not log labels, message search text, or email.
 
-- [ ] **Step 4: Replace view-local change/audit code and verify**
+- [ ] **Step 4: Replace view-local change/audit code and bridge ordinary notifications**
 
-Make `EditView.get_commenting_changes()` and `EditView.log_commenting_changes()` thin delegates initially, so action behavior remains stable before Task 8 changes transaction placement.
+Make `EditView.get_commenting_changes()` and `EditView.log_commenting_changes()` thin delegates. Remove the dead `comments_formset.save_mentions()`, `CommentMention.notified_at`, `new_mentions`, and `mark_comment_mentions_notified()` prototype paths. Until Task 8 installs Task 7's recipient planner, keep only the ordinary upstream subscriber/thread notification behavior reading `CommentingChanges` attributes. It must return early for mention-only or edit-only changes and must not synthesize direct mention mail, query lookup rows, or duplicate Task 7's planner.
+
+Rewrite the three stale prototype action tests that submit a list of user IDs or treat `comment.mentions` as a relation. Use the five-field occurrence payload and generic validation error where an action-level assertion remains useful; replace relation/delivery-state expectations with durable collection/audit integration coverage. Preserve all existing non-mention notification tests.
 
 Run:
 
@@ -1489,16 +1506,10 @@ Add to `CommentFormSet`:
 
 ```python
 def revalidate_new_mentions_for_page(self, page):
-    candidates = page_mention_candidates(page)
-    added = tuple(
-        occurrence
-        for form in self.iter_mention_forms(include_deleted=False, valid_only=True)
-        for occurrence in form.mention_changes.added
-    )
-    resolve_new_mention_users(added, candidates)
+    self.validate_new_mentions(page_mention_candidates(page))
 ```
 
-For save/publish/submit create actions, use one `transaction.atomic()` around: provisional `add_child`, actual-page recheck, comment/reply JSON save, inverse-index synchronization, revision, subscription, audit, notification scheduling, and publish/workflow start. Convert recheck failure into the `mentions` form error and roll back all database effects. Before HTML rerender after rollback, reconstruct the unsaved page/form instance so its PK/path/depth/state do not describe the rolled-back tree node.
+For save/publish/submit create actions, use one `transaction.atomic()` around: provisional `add_child`, actual-page recheck, comment/reply JSON save, inverse-index synchronization, revision, subscription, audit, notification scheduling, and publish/workflow start. `validate_new_mentions()` already maps invalid occurrence indices to the exact comment/reply fields and preserves bound redisplay; let its re-raised `InvalidMentionTargets` roll back all database effects. Before escaping the failed transaction, capture each invalid form prefix, its submitted occurrence list, and the generic field error. Reconstruct the unsaved page and bound form so its PK/path/depth/state do not describe the rolled-back tree node, then reapply that captured state to the matching comment/reply forms before serialization and HTML rerender. An equivalent reconstruction path is acceptable only if it preserves the exact field error and occurrence list. The permission-loss regression must assert the exact comment/reply error, retained hidden JSON, serialized occurrence, and absence of every rolled-back database effect.
 
 - [ ] **Step 5: Verify all edit/create paths and UUID users**
 
@@ -1642,6 +1653,8 @@ git commit -m "Add client-side mention wire helpers"
 ### Task 10: Comment/Reply State, Hydration, Dirty Checks, and Hidden Forms
 
 **Files:**
+- Modify: `wagtail/admin/forms/comments.py`
+- Modify: `wagtail/admin/tests/test_edit_handlers.py`
 - Modify: `client/src/components/CommentApp/state/comments.ts`
 - Modify: `client/src/components/CommentApp/state/comments.test.ts`
 - Modify: `client/src/components/CommentApp/state/settings.ts`
@@ -1679,7 +1692,7 @@ expect(
 ).toBe(JSON.stringify([{ key, user_id, start, end, label }]));
 ```
 
-Hydration tests must load serialized comment/reply occurrences and `mentioned_users`, update both via autosave, preserve canonical occurrence values, replace current emails without changing text/labels or dirty state, clear working values, omit deleted-user metadata cleanly, and never require author email/URL data.
+Hydration tests must load serialized comment/reply occurrences and `mentioned_users`, update both via autosave, preserve canonical occurrence values, replace current emails without changing text/labels or dirty state, clear working values, omit deleted-user metadata cleanly, and never require author email/URL data. A bound server rejection must serialize only the generic `mentions` error onto the exact comment or reply, retain the submitted occurrence list, and hydrate that error into the matching client state without exposing target details.
 
 - [ ] **Step 2: Run focused tests and verify failures**
 
@@ -1705,14 +1718,16 @@ mentions;
 originalMentions;
 newMentions;
 newReplyMentions;
+mentionError?: string;
 
 // CommentReply
 mentions;
 originalMentions;
 newMentions;
+mentionError?: string;
 ```
 
-Initialize arrays without sharing mutable references. Dirty comparison must compare canonical serialized occurrence arrays, including key, user ID, range, and label; sorting only normalizes already-valid `(start,end,key)` order.
+Initialize arrays without sharing mutable references and initialize `mentionError` independently on comments and replies. Hydration/update loads `mention_error`; the first local text or occurrence change clears only that message's error. Dirty comparison must compare canonical serialized occurrence arrays, including key, user ID, range, and label; sorting only normalizes already-valid `(start,end,key)` order. A server error is presentation state and does not itself make the page dirty.
 
 Add to global settings without mixing it into occurrence identity:
 
@@ -1722,13 +1737,13 @@ mentionedUsers: Record<string, MentionedUser>;
 
 - [ ] **Step 4: Implement complete hidden forms and wire hydration**
 
-Add serialized `mentions` to `InitialComment` and `InitialCommentReply`, and add the exact server key to `CommentAppData`:
+Add serialized `mentions` plus an optional generic `mention_error` to `InitialComment` and `InitialCommentReply`, and add the exact server key to `CommentAppData`:
 
 ```typescript
 mentioned_users: Record<string, MentionedUser>;
 ```
 
-Convert occurrences using Task 9 helpers. Always output complete lists for every participating form:
+Convert occurrences using Task 9 helpers. Carry `mention_error` separately from occurrence identity and clear it when the user changes that message's text or occurrence list. Always output complete lists for every participating form:
 
 ```typescript
 value={JSON.stringify(serializeMentionOccurrences(comment.mentions))}
@@ -1755,7 +1770,7 @@ Expected: all PASS.
 - [ ] **Step 6: Commit the state and wire contract**
 
 ```bash
-git add client/src/components/CommentApp/state client/src/components/CommentApp/selectors client/src/components/CommentApp/__fixtures__/state.tsx client/src/components/CommentApp/components/Form client/src/components/CommentApp/main.tsx client/src/components/CommentApp/main.test.tsx
+git add wagtail/admin/forms/comments.py wagtail/admin/tests/test_edit_handlers.py client/src/components/CommentApp/state client/src/components/CommentApp/selectors client/src/components/CommentApp/__fixtures__/state.tsx client/src/components/CommentApp/components/Form client/src/components/CommentApp/main.tsx client/src/components/CommentApp/main.test.tsx
 git commit -m "Track mentions for comments and replies"
 ```
 
@@ -1892,11 +1907,12 @@ export interface MentionEditorProps {
   mentions: readonly MentionOccurrence[];
   mentionedUsers: Readonly<Record<string, MentionedUser>>;
   mentionSuggestionsUrl?: string;
+  error?: string;
   onChange(value: string, mentions: MentionOccurrence[]): void;
 }
 ```
 
-Test one Draftail `[contenteditable="true"]`, no `<textarea>`, no `.Draftail-Toolbar`, no formatting controls, `stripPastedStyles`, typing Enter/multiline text, selected-range paste, emoji offsets, query recomputation from `EditorState` selection, composition start/end, ArrowUp/Down wrap, Enter selection, Escape close, Tab closing without prevention, pointer selection without blur, loading/empty/error/ready status text, accessible name, listbox ownership, expanded state, and active-option announcement on the actual focusable editor surface. The mention decorator renders `.comment__mention`, the saved label, `data-mention-user-id`, and separately hydrated current-email metadata without rewriting visible text. Also prove that a parent echo of the just-emitted value preserves selection/undo history, a genuinely different external value rehydrates the editor, and a metadata-only change rerenders decoration without rehydrating or dirtying content.
+Test one Draftail `[contenteditable="true"]`, no `<textarea>`, no `.Draftail-Toolbar`, no formatting controls, `stripPastedStyles`, typing Enter/multiline text, selected-range paste, emoji offsets, query recomputation from `EditorState` selection, composition start/end, ArrowUp/Down wrap, Enter selection, Escape close, Tab closing without prevention, pointer selection without blur, loading/empty/error/ready status text, accessible name, listbox ownership, expanded state, and active-option announcement on the actual focusable editor surface. A generic bound `mentions` error must be visibly adjacent to the exact comment/reply editor, use `role="alert"`, and be connected to the focusable surface with `aria-describedby`; no target identifier or permission detail is rendered. The mention decorator renders `.comment__mention`, the saved label, `data-mention-user-id`, and separately hydrated current-email metadata without rewriting visible text. Also prove that a parent echo of the just-emitted value preserves selection/undo history, a genuinely different external value rehydrates the editor, and a metadata-only change rerenders decoration without rehydrating or dirtying content.
 
 Renderer tests cover plain/multiple/repeated ranges, duplicate labels, emoji/multiline, malformed range fallback, HTML-like escaping, and `<span class="comment__mention">` with no link.
 
@@ -1954,7 +1970,7 @@ The decorator never calls Draftail's `onEdit`, and mention creation always uses 
 />
 ```
 
-On each editor-state change, normalize any entity whose current text differs from its stored label by removing that entity association, then serialize and call `onChange(value, mentions)` once. Keep focus and selection in Draftail. When parent props change, compare canonical serialized props with the current editor state: ignore an equal Redux echo so selection and undo history survive, but close suggestions and rebuild the editor state for a genuinely different external text/occurrence value such as cancel or server hydration. A `mentionedUsers`-only change flows through the decorator context and never rebuilds editor state. A small ref-backed ARIA bridge sets `role="combobox"`, `aria-multiline="true"`, `aria-autocomplete="list"`, `aria-haspopup="listbox"`, `aria-controls`, `aria-expanded`, and `aria-activedescendant` on Draft.js's actual contenteditable element and removes stale attributes on close/unmount. The popup uses `role="listbox"`; items use stable IDs, `role="option"`, and `aria-selected`. Use localized `role="status" aria-live="polite"` text for loading, no matches, unavailable, result count, and active-option changes.
+On each editor-state change, normalize any entity whose current text differs from its stored label by removing that entity association, then serialize and call `onChange(value, mentions)` once. Keep focus and selection in Draftail. When parent props change, compare canonical serialized props with the current editor state: ignore an equal Redux echo so selection and undo history survive, but close suggestions and rebuild the editor state for a genuinely different external text/occurrence value such as cancel or server hydration. A `mentionedUsers`-only change flows through the decorator context and never rebuilds editor state. A small ref-backed ARIA bridge sets `role="combobox"`, `aria-multiline="true"`, `aria-autocomplete="list"`, `aria-haspopup="listbox"`, `aria-controls`, `aria-expanded`, and `aria-activedescendant` on Draft.js's actual contenteditable element and removes stale attributes on close/unmount. When `error` is present, render an adjacent `role="alert"` element with a stable ID and add that ID to `aria-describedby` on the actual contenteditable; remove the attribute when the error clears or the component unmounts. The popup uses `role="listbox"`; items use stable IDs, `role="option"`, and `aria-selected`. Use localized `role="status" aria-live="polite"` text for loading, no matches, unavailable, result count, and active-option changes.
 
 Handle suggestion navigation on bubbled editor key events without a DOM caret walker: ArrowUp/Down changes the active result, Enter inserts only when results are ready, Escape closes, and Tab closes without `preventDefault`. Pointer `mousedown` prevents editor blur and inserts against the saved Draft selection. Composition suppresses queries until `compositionend`; blur, cancel, deletion, and unmount abort outstanding work.
 
@@ -1962,7 +1978,7 @@ Handle suggestion navigation on bubbled editor key events without a DOM caret wa
 
 Comments use IDs `comment-mention-editor-${localId}` with localized labels `Add a comment` / `Edit comment`. New replies use `comment-new-reply-mention-editor-${comment.localId}` and `comment.newReplyMentions`; existing reply edits use `comment-reply-mention-editor-${comment.localId}-${reply.localId}` and `reply.newMentions`.
 
-Pass `settings.mentionedUsers` to every editor and saved renderer. Save commits text and mentions together; cancel restores both; new-reply cancel clears both; display uses `MentionText` for comments and replies. Style inline entities and selected options for normal and `@media (forced-colors: active)`, cap popup height with scrolling, suppress every Draftail toolbar container, and delete prototype contenteditable/caret-walker styles.
+Pass `settings.mentionedUsers` to every editor and saved renderer. Pass each message's generic server error only to its own editor and clear it on the next local text/mention change. Save commits text and mentions together; cancel restores both; new-reply cancel clears both; display uses `MentionText` for comments and replies. Style inline entities, errors, and selected options for normal and `@media (forced-colors: active)`, cap popup height with scrolling, suppress every Draftail toolbar container, and delete prototype contenteditable/caret-walker styles.
 
 - [ ] **Step 6: Run complete CommentApp unit/style/type verification**
 
