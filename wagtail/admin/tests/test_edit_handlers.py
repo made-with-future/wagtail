@@ -1,3 +1,4 @@
+import json
 from collections.abc import Mapping
 from datetime import date, datetime, timezone
 from functools import wraps
@@ -44,7 +45,14 @@ from wagtail.contrib.forms.models import FormSubmission
 from wagtail.contrib.forms.panels import FormSubmissionsPanel
 from wagtail.coreutils import get_dummy_request
 from wagtail.images import get_image_model
-from wagtail.models import Comment, CommentReply, Page, Site
+from wagtail.models import (
+    Comment,
+    CommentMention,
+    CommentReply,
+    CommentReplyMention,
+    Page,
+    Site,
+)
 from wagtail.test.testapp.forms import ValidatedPageForm
 from wagtail.test.testapp.models import (
     Advert,
@@ -61,6 +69,8 @@ from wagtail.test.testapp.models import (
     ValidatedPage,
 )
 from wagtail.test.utils import WagtailTestUtils
+
+MENTIONS_NOT_PROVIDED = object()
 
 
 class TestGetFormForModel(TestCase):
@@ -1760,6 +1770,83 @@ class TestCommentPanel(WagtailTestUtils, TestCase):
         self.reply_2 = CommentReply.objects.create(
             comment=self.comment, text="reply_2", user=self.commenting_user
         )
+        self.mention_target = self.create_user(
+            "task-4-mention-target", email="mention-target@example.com"
+        )
+        self.mention_label = "@target"
+        self.valid_occurrence = {
+            "key": "29cc6a1f-00ed-41d7-94b1-d46a947962cb",
+            "user_id": str(self.mention_target.pk),
+            "start": 0,
+            "end": len(self.mention_label),
+            "label": self.mention_label,
+        }
+
+    def make_page_form(
+        self,
+        *,
+        comment_mentions=MENTIONS_NOT_PROVIDED,
+        reply_mentions=MENTIONS_NOT_PROVIDED,
+        data_overrides=None,
+        form_class=None,
+    ):
+        data = {
+            "comments-TOTAL_FORMS": 1,
+            "comments-INITIAL_FORMS": 1,
+            "comments-MIN_NUM_FORMS": 0,
+            "comments-MAX_NUM_FORMS": 1000,
+            "comments-0-id": self.comment.pk,
+            "comments-0-text": self.comment.text,
+            "comments-0-contentpath": self.comment.contentpath,
+            "comments-0-position": self.comment.position,
+            "comments-0-resolved": bool(self.comment.resolved_at),
+            "comments-0-replies-TOTAL_FORMS": 2,
+            "comments-0-replies-INITIAL_FORMS": 2,
+            "comments-0-replies-MIN_NUM_FORMS": 0,
+            "comments-0-replies-MAX_NUM_FORMS": 1000,
+            "comments-0-replies-0-id": self.reply_1.pk,
+            "comments-0-replies-0-text": self.reply_1.text,
+            "comments-0-replies-1-id": self.reply_2.pk,
+            "comments-0-replies-1-text": self.reply_2.text,
+        }
+        if comment_mentions is not MENTIONS_NOT_PROVIDED:
+            data["comments-0-mentions"] = comment_mentions
+        if reply_mentions is not MENTIONS_NOT_PROVIDED:
+            data["comments-0-replies-0-mentions"] = reply_mentions
+        if data_overrides:
+            data.update(data_overrides)
+
+        return (form_class or self.EventPageForm)(
+            data,
+            instance=self.event_page,
+            parent_page=self.event_page.get_parent(),
+            for_user=self.commenting_user,
+        )
+
+    def store_mentions(self, message, occurrences, *, text=None):
+        message.text = text if text is not None else self.mention_label
+        message.mentions = occurrences
+        message.save(update_fields=["text", "mentions"])
+
+    def make_messages_editable(self):
+        self.comment.user = self.commenting_user
+        self.comment.save(update_fields=["user"])
+        self.reply_1.user = self.commenting_user
+        self.reply_1.save(update_fields=["user"])
+
+    def repeated_occurrences(self, *, user_ids=None):
+        if user_ids is None:
+            user_ids = [str(self.mention_target.pk)] * 2
+        return [
+            self.valid_occurrence | {"user_id": user_ids[0]},
+            self.valid_occurrence
+            | {
+                "key": "327547cc-f9ee-4bce-852f-bf96f14179b9",
+                "user_id": user_ids[1],
+                "start": 12,
+                "end": 19,
+            },
+        ]
 
     def test_comments_toggle_enabled(self):
         """
@@ -1833,17 +1920,17 @@ class TestCommentPanel(WagtailTestUtils, TestCase):
         ).children[0]
         data = panel.get_context_data()["comments_data"]
 
-        self.assertEqual(data["user"], self.commenting_user.pk)
+        self.assertEqual(data["user"], str(self.commenting_user.pk))
 
         self.assertEqual(len(data["comments"]), 1)
-        self.assertEqual(data["comments"][0]["user"], self.comment.user.pk)
+        self.assertEqual(data["comments"][0]["user"], str(self.comment.user.pk))
 
         self.assertEqual(len(data["comments"][0]["replies"]), 2)
         self.assertEqual(
-            data["comments"][0]["replies"][0]["user"], self.reply_1.user.pk
+            data["comments"][0]["replies"][0]["user"], str(self.reply_1.user.pk)
         )
         self.assertEqual(
-            data["comments"][0]["replies"][1]["user"], self.reply_2.user.pk
+            data["comments"][0]["replies"][1]["user"], str(self.reply_2.user.pk)
         )
 
         self.assertIn(str(self.commenting_user.pk), data["authors"])
@@ -1861,19 +1948,511 @@ class TestCommentPanel(WagtailTestUtils, TestCase):
         Check that the form has the comments/replies formsets, and that the
         user has been set on each CommentForm/CommentReplyForm instance
         """
+        parent_page = self.event_page.get_parent()
         form = self.EventPageForm(
-            instance=self.event_page, for_user=self.commenting_user
+            instance=self.event_page,
+            parent_page=parent_page,
+            for_user=self.commenting_user,
         )
 
         self.assertIn("comments", form.formsets)
 
         comments_formset = form.formsets["comments"]
+        self.assertEqual(comments_formset.for_user, self.commenting_user)
+        self.assertEqual(comments_formset.parent_page, parent_page)
         self.assertEqual(len(comments_formset.forms), 1)
         self.assertEqual(comments_formset.forms[0].for_user, self.commenting_user)
+        self.assertEqual(comments_formset.forms[0].page, self.event_page)
+        self.assertEqual(comments_formset.forms[0].parent_page, parent_page)
 
         replies_formset = comments_formset.forms[0].formsets["replies"]
         self.assertEqual(len(replies_formset.forms), 2)
         self.assertEqual(replies_formset.forms[0].for_user, self.commenting_user)
+        self.assertEqual(replies_formset.forms[0].page, self.event_page)
+        self.assertEqual(replies_formset.forms[0].parent_page, parent_page)
+
+        new_page = EventPage(title="Unsaved event")
+        create_form = self.EventPageForm(
+            instance=new_page,
+            parent_page=parent_page,
+            for_user=self.commenting_user,
+        )
+        empty_comment = create_form.formsets["comments"].empty_form
+        empty_reply = empty_comment.formsets["replies"].empty_form
+        self.assertEqual(empty_comment.page, new_page)
+        self.assertEqual(empty_comment.parent_page, parent_page)
+        self.assertEqual(empty_reply.page, new_page)
+        self.assertEqual(empty_reply.parent_page, parent_page)
+
+    def test_omitted_fields_preserve_comment_and_reply_mentions(self):
+        self.store_mentions(self.comment, [self.valid_occurrence])
+        self.store_mentions(self.reply_1, [self.valid_occurrence])
+
+        form = self.make_page_form()
+
+        self.assertTrue(form.is_valid(), form.errors)
+        comment_form = form.formsets["comments"].forms[0]
+        reply_form = comment_form.formsets["replies"].forms[0]
+        self.assertEqual(comment_form.cleaned_data["mentions"], [self.valid_occurrence])
+        self.assertEqual(reply_form.cleaned_data["mentions"], [self.valid_occurrence])
+        self.assertNotIn("mentions", comment_form.changed_data)
+        self.assertNotIn("mentions", reply_form.changed_data)
+
+    def test_hydrated_fields_do_not_dirty_another_authors_messages(self):
+        self.store_mentions(self.comment, [self.valid_occurrence])
+        self.store_mentions(self.reply_1, [self.valid_occurrence])
+        payload = json.dumps([self.valid_occurrence])
+
+        form = self.make_page_form(
+            comment_mentions=payload,
+            reply_mentions=payload,
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        comment_form = form.formsets["comments"].forms[0]
+        reply_form = comment_form.formsets["replies"].forms[0]
+        self.assertFalse(comment_form.has_changed())
+        self.assertFalse(reply_form.has_changed())
+        self.assertEqual(comment_form.mention_changes.added, ())
+        self.assertEqual(comment_form.mention_changes.removed, ())
+        self.assertEqual(reply_form.mention_changes.added, ())
+        self.assertEqual(reply_form.mention_changes.removed, ())
+
+    def test_explicit_empty_lists_record_comment_and_reply_removals(self):
+        self.make_messages_editable()
+        self.store_mentions(self.comment, [self.valid_occurrence])
+        self.store_mentions(self.reply_1, [self.valid_occurrence])
+
+        form = self.make_page_form(comment_mentions="[]", reply_mentions="[]")
+
+        self.assertTrue(form.is_valid(), form.errors)
+        comment_form = form.formsets["comments"].forms[0]
+        reply_form = comment_form.formsets["replies"].forms[0]
+        self.assertEqual(comment_form.mention_changes.removed, (self.valid_occurrence,))
+        self.assertEqual(reply_form.mention_changes.removed, (self.valid_occurrence,))
+        self.assertEqual(comment_form.cleaned_data["mentions"], [])
+        self.assertEqual(reply_form.cleaned_data["mentions"], [])
+
+    def test_resolve_and_reposition_preserve_omitted_or_hydrated_mentions(self):
+        self.store_mentions(self.comment, [self.valid_occurrence])
+        payload = json.dumps([self.valid_occurrence])
+
+        for name, mentions in (
+            ("omitted", MENTIONS_NOT_PROVIDED),
+            ("hydrated", payload),
+        ):
+            with self.subTest(name=name):
+                form = self.make_page_form(
+                    comment_mentions=mentions,
+                    data_overrides={
+                        "comments-0-position": "new-position",
+                        "comments-0-resolved": "1",
+                    },
+                )
+
+                self.assertTrue(form.is_valid(), form.errors)
+                comment_form = form.formsets["comments"].forms[0]
+                self.assertEqual(
+                    comment_form.cleaned_data["mentions"], [self.valid_occurrence]
+                )
+                self.assertNotIn("mentions", comment_form.changed_data)
+
+    def test_omitted_field_redisplays_canonical_initial_after_page_error(self):
+        self.store_mentions(self.comment, [self.valid_occurrence])
+        form_class = (
+            ObjectList([FieldPanel("title"), CommentPanel()])
+            .bind_to_model(EventPage)
+            .get_form_class()
+        )
+
+        form = self.make_page_form(
+            form_class=form_class,
+            data_overrides={"title": ""},
+        )
+
+        self.assertFalse(form.is_valid())
+        comment_form = form.formsets["comments"].forms[0]
+        self.assertEqual(
+            comment_form["mentions"].value(),
+            json.dumps(
+                [self.valid_occurrence], ensure_ascii=False, separators=(",", ":")
+            ),
+        )
+
+    def test_retained_mentions_ignore_account_and_permission_drift(self):
+        self.store_mentions(self.comment, [self.valid_occurrence])
+        email_field = self.mention_target.get_email_field_name()
+        setattr(self.mention_target, email_field, "renamed@example.com")
+        self.mention_target.is_active = False
+        self.mention_target.save(update_fields=[email_field, "is_active"])
+
+        form = self.make_page_form(comment_mentions=json.dumps([self.valid_occurrence]))
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(
+            form.formsets["comments"].forms[0].cleaned_data["mentions"],
+            [self.valid_occurrence],
+        )
+
+        self.mention_target.delete()
+        deleted_target_form = self.make_page_form()
+        self.assertTrue(deleted_target_form.is_valid(), deleted_target_form.errors)
+        self.assertEqual(
+            deleted_target_form.formsets["comments"].forms[0].cleaned_data["mentions"],
+            [self.valid_occurrence],
+        )
+
+    def test_invalid_stored_entries_are_sanitized_without_dirtying_other_author(self):
+        invalid = {"private-payload": "do not persist or display"}
+        self.store_mentions(self.comment, [self.valid_occurrence, invalid])
+
+        with self.assertLogs(
+            "wagtail.admin.comment_mentions", level="WARNING"
+        ) as log_output:
+            form = self.make_page_form(
+                comment_mentions=json.dumps([self.valid_occurrence])
+            )
+            self.assertTrue(form.is_valid(), form.errors)
+
+        comment_form = form.formsets["comments"].forms[0]
+        self.assertEqual(comment_form.initial["mentions"], [self.valid_occurrence])
+        self.assertEqual(comment_form.cleaned_data["mentions"], [self.valid_occurrence])
+        self.assertFalse(comment_form.has_changed())
+        form.save()
+        self.comment.refresh_from_db()
+        self.assertEqual(self.comment.mentions, [self.valid_occurrence, invalid])
+        self.assertNotIn("private-payload", " ".join(log_output.output))
+
+    def test_invalid_browser_payloads_use_generic_errors_and_serialize_safely(self):
+        self.make_messages_editable()
+        self.store_mentions(self.comment, [self.valid_occurrence])
+        self.store_mentions(self.reply_1, [self.valid_occurrence])
+        oversized = json.dumps(["é" * (16 * 1024)], ensure_ascii=False)
+
+        for field, key, payload in (
+            ("comment-malformed", "comments-0-mentions", "{"),
+            ("comment-blank", "comments-0-mentions", ""),
+            ("comment-oversized", "comments-0-mentions", oversized),
+            ("reply-malformed", "comments-0-replies-0-mentions", "{"),
+            ("reply-blank", "comments-0-replies-0-mentions", ""),
+            ("reply-oversized", "comments-0-replies-0-mentions", oversized),
+        ):
+            with self.subTest(field=field):
+                form = self.make_page_form(data_overrides={key: payload})
+                self.assertFalse(form.is_valid())
+                comment_form = form.formsets["comments"].forms[0]
+                target_form = (
+                    comment_form.formsets["replies"].forms[0]
+                    if "replies" in key
+                    else comment_form
+                )
+                self.assertEqual(
+                    target_form.errors["mentions"], ["Enter a valid mention list."]
+                )
+                data = form.serialize_comments(self.commenting_user)
+                self.assertEqual(
+                    data["comments"][0]["mentions"], [self.valid_occurrence]
+                )
+                self.assertEqual(
+                    data["comments"][0]["replies"][0]["mentions"],
+                    [self.valid_occurrence],
+                )
+                if payload == "{":
+                    self.assertEqual(target_form["mentions"].value(), "{")
+
+    def test_serialization_separates_author_and_live_mention_metadata(self):
+        self.store_mentions(self.comment, [self.valid_occurrence])
+        email_field = self.mention_target.get_email_field_name()
+        setattr(self.mention_target, email_field, "new-address@example.com")
+        self.mention_target.save(update_fields=[email_field])
+        form = self.EventPageForm(
+            instance=self.event_page,
+            parent_page=self.event_page.get_parent(),
+            for_user=self.commenting_user,
+        )
+
+        data = form.formsets["comments"].serialize(
+            bound=False, user=self.commenting_user
+        )
+
+        self.assertEqual(
+            data["mentioned_users"],
+            {str(self.mention_target.pk): {"email": "new-address@example.com"}},
+        )
+        self.assertEqual(data["comments"][0]["mentions"], [self.valid_occurrence])
+        self.assertNotIn(str(self.mention_target.pk), data["authors"])
+        self.assertEqual(
+            set(data["authors"]),
+            {str(self.commenting_user.pk), str(self.other_user.pk)},
+        )
+        for author in data["authors"].values():
+            self.assertEqual(set(author), {"name", "avatar_url"})
+        self.assertIsInstance(data["user"], str)
+        self.assertIsInstance(data["comments"][0]["user"], str)
+        self.assertIsInstance(data["comments"][0]["replies"][0]["user"], str)
+        self.assertTrue(all(isinstance(key, str) for key in data["authors"]))
+        self.assertTrue(all(isinstance(key, str) for key in data["mentioned_users"]))
+        self.assertTrue(
+            all(
+                isinstance(occurrence["user_id"], str)
+                for occurrence in data["comments"][0]["mentions"]
+            )
+        )
+
+    def test_serialization_keeps_current_editor_in_authors(self):
+        self.comment.delete()
+        form = self.EventPageForm(
+            instance=self.event_page,
+            parent_page=self.event_page.get_parent(),
+            for_user=self.commenting_user,
+        )
+
+        data = form.formsets["comments"].serialize(
+            bound=False, user=self.commenting_user
+        )
+
+        self.assertEqual(set(data["authors"]), {str(self.commenting_user.pk)})
+        self.assertEqual(
+            set(data["authors"][str(self.commenting_user.pk)]),
+            {"name", "avatar_url"},
+        )
+
+    def test_prepared_primary_key_occurrence_syncs_and_serializes_exact_key(self):
+        pk_field = get_user_model()._meta.pk
+        prepared_id = str(pk_field.get_prep_value(self.mention_target.pk))
+        occurrence = self.valid_occurrence | {"user_id": prepared_id}
+        self.store_mentions(self.comment, [occurrence])
+        form = self.make_page_form()
+        self.assertTrue(form.is_valid(), form.errors)
+
+        form.save()
+        comments_formset = form.formsets["comments"]
+        comments_formset.sync_mention_lookups()
+        data = comments_formset.serialize(bound=True, user=self.commenting_user)
+
+        self.assertEqual(
+            CommentMention.objects.get(comment=self.comment).user,
+            self.mention_target,
+        )
+        self.assertEqual(
+            data["mentioned_users"],
+            {prepared_id: {"email": "mention-target@example.com"}},
+        )
+        self.assertEqual(data["comments"][0]["mentions"], [occurrence])
+
+    def test_prepared_and_display_primary_key_aliases_share_one_lookup(self):
+        pk_field = get_user_model()._meta.pk
+        prepared_id = str(pk_field.get_prep_value(self.mention_target.pk))
+        display_id = str(self.mention_target.pk)
+        if prepared_id == display_id:
+            self.skipTest("Configured user primary key has no distinct prepared alias")
+        occurrences = self.repeated_occurrences(user_ids=[display_id, prepared_id])
+        self.store_mentions(
+            self.comment,
+            occurrences,
+            text="@target and @target",
+        )
+        form = self.make_page_form()
+        self.assertTrue(form.is_valid(), form.errors)
+
+        form.save()
+        comments_formset = form.formsets["comments"]
+        comments_formset.sync_mention_lookups()
+        data = comments_formset.serialize(bound=True, user=self.commenting_user)
+
+        self.assertEqual(CommentMention.objects.filter(comment=self.comment).count(), 1)
+        self.assertEqual(data["comments"][0]["mentions"], occurrences)
+        self.assertEqual(
+            data["mentioned_users"],
+            {
+                display_id: {"email": "mention-target@example.com"},
+                prepared_id: {"email": "mention-target@example.com"},
+            },
+        )
+
+    def test_repeated_occurrences_remain_distinct_but_create_one_lookup(self):
+        self.make_messages_editable()
+        occurrences = self.repeated_occurrences()
+        text = "@target and @target"
+        form = self.make_page_form(
+            comment_mentions=json.dumps(occurrences),
+            reply_mentions=json.dumps(occurrences),
+            data_overrides={
+                "comments-0-text": text,
+                "comments-0-replies-0-text": text,
+            },
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+
+        form.save()
+        form.formsets["comments"].sync_mention_lookups()
+        self.comment.refresh_from_db()
+        self.reply_1.refresh_from_db()
+
+        self.assertEqual(self.comment.mentions, occurrences)
+        self.assertEqual(self.reply_1.mentions, occurrences)
+        self.assertEqual(CommentMention.objects.filter(comment=self.comment).count(), 1)
+        self.assertEqual(
+            CommentReplyMention.objects.filter(reply=self.reply_1).count(), 1
+        )
+
+    def test_explicit_clearing_removes_only_exact_message_lookup_rows(self):
+        self.make_messages_editable()
+        self.store_mentions(self.comment, [self.valid_occurrence])
+        self.store_mentions(self.reply_1, [self.valid_occurrence])
+        other_comment = Comment.objects.create(
+            page=self.event_page,
+            user=self.commenting_user,
+            text=self.mention_label,
+            mentions=[self.valid_occurrence],
+            contentpath="location",
+        )
+        other_reply = CommentReply.objects.create(
+            comment=other_comment,
+            user=self.commenting_user,
+            text=self.mention_label,
+            mentions=[self.valid_occurrence],
+        )
+        CommentMention.objects.bulk_create(
+            [
+                CommentMention(comment=self.comment, user=self.mention_target),
+                CommentMention(comment=other_comment, user=self.mention_target),
+            ]
+        )
+        CommentReplyMention.objects.bulk_create(
+            [
+                CommentReplyMention(reply=self.reply_1, user=self.mention_target),
+                CommentReplyMention(reply=other_reply, user=self.mention_target),
+            ]
+        )
+        form = self.make_page_form(comment_mentions="[]", reply_mentions="[]")
+        self.assertTrue(form.is_valid(), form.errors)
+
+        form.save()
+        form.formsets["comments"].sync_mention_lookups()
+
+        self.assertFalse(CommentMention.objects.filter(comment=self.comment).exists())
+        self.assertFalse(
+            CommentReplyMention.objects.filter(reply=self.reply_1).exists()
+        )
+        self.assertTrue(CommentMention.objects.filter(comment=other_comment).exists())
+        self.assertTrue(CommentReplyMention.objects.filter(reply=other_reply).exists())
+
+    def test_deleted_targets_are_not_recreated_from_retained_occurrences(self):
+        self.make_messages_editable()
+        self.store_mentions(self.comment, [self.valid_occurrence])
+        self.store_mentions(self.reply_1, [self.valid_occurrence])
+        CommentMention.objects.create(comment=self.comment, user=self.mention_target)
+        CommentReplyMention.objects.create(reply=self.reply_1, user=self.mention_target)
+        self.mention_target.delete()
+        form = self.make_page_form()
+        self.assertTrue(form.is_valid(), form.errors)
+
+        form.save()
+        comments_formset = form.formsets["comments"]
+        comments_formset.sync_mention_lookups()
+        data = comments_formset.serialize(bound=True, user=self.commenting_user)
+        self.comment.refresh_from_db()
+        self.reply_1.refresh_from_db()
+
+        self.assertEqual(self.comment.mentions, [self.valid_occurrence])
+        self.assertEqual(self.reply_1.mentions, [self.valid_occurrence])
+        self.assertFalse(CommentMention.objects.filter(comment=self.comment).exists())
+        self.assertFalse(
+            CommentReplyMention.objects.filter(reply=self.reply_1).exists()
+        )
+        self.assertEqual(data["mentioned_users"], {})
+
+    def test_deleted_comment_skips_nested_reply_lookup_synchronization(self):
+        self.comment.user = self.commenting_user
+        self.comment.save(update_fields=["user"])
+        self.store_mentions(self.reply_1, [self.valid_occurrence])
+        CommentReplyMention.objects.create(reply=self.reply_1, user=self.mention_target)
+        comment_pk = self.comment.pk
+        reply_pk = self.reply_1.pk
+        form = self.make_page_form(data_overrides={"comments-0-DELETE": "1"})
+        self.assertTrue(form.is_valid(), form.errors)
+
+        form.save()
+        form.formsets["comments"].sync_mention_lookups()
+
+        self.assertFalse(Comment.objects.filter(pk=comment_pk).exists())
+        self.assertFalse(CommentReply.objects.filter(pk=reply_pk).exists())
+        self.assertFalse(CommentReplyMention.objects.filter(reply_id=reply_pk).exists())
+
+    def test_new_comment_and_reply_have_primary_keys_before_lookup_sync(self):
+        data_overrides = {
+            "comments-TOTAL_FORMS": 2,
+            "comments-1-id": "",
+            "comments-1-text": self.mention_label,
+            "comments-1-contentpath": "location",
+            "comments-1-position": "",
+            "comments-1-resolved": "",
+            "comments-1-mentions": json.dumps([self.valid_occurrence]),
+            "comments-1-replies-TOTAL_FORMS": 1,
+            "comments-1-replies-INITIAL_FORMS": 0,
+            "comments-1-replies-MIN_NUM_FORMS": 0,
+            "comments-1-replies-MAX_NUM_FORMS": 1000,
+            "comments-1-replies-0-id": "",
+            "comments-1-replies-0-text": self.mention_label,
+            "comments-1-replies-0-mentions": json.dumps([self.valid_occurrence]),
+        }
+        form = self.make_page_form(data_overrides=data_overrides)
+        self.assertTrue(form.is_valid(), form.errors)
+
+        form.save()
+        comments_formset = form.formsets["comments"]
+        new_comment_form = comments_formset.forms[1]
+        new_reply_form = new_comment_form.formsets["replies"].forms[0]
+        self.assertIsNotNone(new_comment_form.instance.pk)
+        self.assertIsNotNone(new_reply_form.instance.pk)
+        comments_formset.sync_mention_lookups()
+
+        self.assertTrue(
+            CommentMention.objects.filter(
+                comment=new_comment_form.instance, user=self.mention_target
+            ).exists()
+        )
+        self.assertTrue(
+            CommentReplyMention.objects.filter(
+                reply=new_reply_form.instance, user=self.mention_target
+            ).exists()
+        )
+
+    def test_serialization_uses_two_bulk_user_queries(self):
+        occurrences = self.repeated_occurrences()
+        text = "@target and @target"
+        self.store_mentions(self.comment, occurrences, text=text)
+        self.store_mentions(self.reply_1, occurrences, text=text)
+        other_comment = Comment.objects.create(
+            page=self.event_page,
+            user=self.commenting_user,
+            text=text,
+            mentions=occurrences,
+            contentpath="location",
+        )
+        CommentReply.objects.create(
+            comment=other_comment,
+            user=self.other_user,
+            text=text,
+            mentions=occurrences,
+        )
+        form = self.EventPageForm(
+            instance=self.event_page,
+            parent_page=self.event_page.get_parent(),
+            for_user=self.commenting_user,
+        )
+        comments_formset = form.formsets["comments"]
+        for comment_form in comments_formset.forms:
+            list(comment_form.formsets["replies"].forms)
+
+        with self.assertNumQueries(2):
+            data = comments_formset.serialize(bound=False, user=self.commenting_user)
+
+        self.assertEqual(
+            data["mentioned_users"],
+            {str(self.mention_target.pk): {"email": "mention-target@example.com"}},
+        )
 
     def test_comment_form_validation(self):
         form = self.EventPageForm(

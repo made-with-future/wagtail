@@ -121,6 +121,7 @@ def validate_mention_occurrences(
         try:
             parsed_user_id = user_pk_field.to_python(user_id_value)
             prepared_user_id = user_pk_field.get_prep_value(parsed_user_id)
+            user_pk_field.run_validators(prepared_user_id)
         except (OverflowError, TypeError, ValueError, ValidationError) as error:
             raise ValidationError(_INVALID_MENTIONS_MESSAGE) from error
         if parsed_user_id is None or prepared_user_id is None:
@@ -241,6 +242,46 @@ def sanitize_stored_mentions(
                 "Ignoring invalid stored comment mention for message %s.", message_id
             )
     return tuple(accepted)
+
+
+def sync_message_mention_lookups(*, message, occurrences) -> None:
+    from wagtail.models import (
+        Comment,
+        CommentMention,
+        CommentReply,
+        CommentReplyMention,
+    )
+
+    if isinstance(message, Comment):
+        lookup_model = CommentMention
+        message_field = "comment"
+    elif isinstance(message, CommentReply):
+        lookup_model = CommentReplyMention
+        message_field = "reply"
+    else:
+        raise TypeError("Mention lookups require a comment or comment reply.")
+
+    target_ids = {occurrence["user_id"] for occurrence in occurrences}
+    users = list(get_user_model()._default_manager.filter(pk__in=target_ids))
+    message_lookups = lookup_model.objects.filter(**{message_field: message})
+    if users:
+        message_lookups.exclude(user__in=users).delete()
+    else:
+        message_lookups.delete()
+
+    existing_user_ids = set(
+        lookup_model.objects.filter(
+            **{message_field: message}, user__in=users
+        ).values_list("user_id", flat=True)
+    )
+    lookup_model.objects.bulk_create(
+        [
+            lookup_model(**{message_field: message}, user=user)
+            for user in users
+            if user.pk not in existing_user_ids
+        ],
+        ignore_conflicts=True,
+    )
 
 
 def split_text_by_mentions(

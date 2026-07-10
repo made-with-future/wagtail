@@ -1,4 +1,6 @@
 import json
+import uuid
+from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -23,10 +25,16 @@ MENTION_KEY = "29cc6a1f-00ed-41d7-94b1-d46a947962cb"
 SECOND_MENTION_KEY = "327547cc-f9ee-4bce-852f-bf96f14179b9"
 
 
+def valid_user_id():
+    if get_user_model()._meta.pk.get_internal_type() == "UUIDField":
+        return str(uuid.UUID(int=1))
+    return "1"
+
+
 def mention_occurrence(**overrides):
     occurrence = {
         "key": MENTION_KEY,
-        "user_id": "1",
+        "user_id": valid_user_id(),
         "start": 0,
         "end": 3,
         "label": "@Jo",
@@ -68,7 +76,7 @@ class TestMentionOccurrenceValidation(TestCase):
         value = [
             {
                 "key": "29cc6a1f-00ed-41d7-94b1-d46a947962cb",
-                "user_id": "1",
+                "user_id": valid_user_id(),
                 "start": 4,
                 "end": 7,
                 "label": "@Jo",
@@ -124,16 +132,22 @@ class TestMentionOccurrenceValidation(TestCase):
                         [mention_occurrence(user_id=user_id)], text="@Jo"
                     )
 
-    def test_numeric_and_string_user_ids_have_the_same_canonical_value(self):
-        numeric = validate_mention_occurrences(
-            [mention_occurrence(user_id=1)], text="@Jo"
+    def test_native_and_string_user_ids_have_the_same_canonical_value(self):
+        string_user_id = valid_user_id()
+        native_user_id = (
+            string_user_id.upper()
+            if get_user_model()._meta.pk.get_internal_type() == "UUIDField"
+            else int(string_user_id)
+        )
+        native = validate_mention_occurrences(
+            [mention_occurrence(user_id=native_user_id)], text="@Jo"
         )
         string = validate_mention_occurrences(
-            [mention_occurrence(user_id="1")], text="@Jo"
+            [mention_occurrence(user_id=string_user_id)], text="@Jo"
         )
 
-        self.assertEqual(numeric[0]["user_id"], string[0]["user_id"])
-        self.assertIsInstance(numeric[0]["user_id"], str)
+        self.assertEqual(native[0]["user_id"], string[0]["user_id"])
+        self.assertIsInstance(native[0]["user_id"], str)
 
     def test_user_id_rejects_floating_point_values(self):
         for user_id in (1.0, 1.5):
@@ -142,6 +156,12 @@ class TestMentionOccurrenceValidation(TestCase):
                     validate_mention_occurrences(
                         [mention_occurrence(user_id=user_id)], text="@Jo"
                     )
+
+    def test_user_id_must_fit_the_configured_primary_key_field(self):
+        with self.assertRaises(ValidationError):
+            validate_mention_occurrences(
+                [mention_occurrence(user_id="1" * 900)], text="@Jo"
+            )
 
     def test_offsets_must_be_non_boolean_integers(self):
         for field in ("start", "end"):
@@ -302,6 +322,115 @@ class TestStoredMentionHandling(SimpleTestCase):
         )
 
 
+class TestCommentMentionsField(SimpleTestCase):
+    def test_omission_is_distinct_from_an_explicit_empty_list(self):
+        from wagtail.admin.forms.comment_mentions import (
+            MENTIONS_OMITTED,
+            CommentMentionsField,
+        )
+
+        field = CommentMentionsField(required=False)
+        initial = [mention_occurrence()]
+
+        self.assertIs(
+            field.widget.value_from_datadict({}, {}, "mentions"), MENTIONS_OMITTED
+        )
+        self.assertEqual(field.bound_data(MENTIONS_OMITTED, initial), initial)
+        self.assertFalse(field.has_changed(initial, MENTIONS_OMITTED))
+        self.assertTrue(field.has_changed(initial, "[]"))
+
+    def test_prepare_value_is_compact_and_preserves_invalid_json(self):
+        from wagtail.admin.forms.comment_mentions import CommentMentionsField
+
+        field = CommentMentionsField(required=False)
+
+        self.assertEqual(
+            field.prepare_value([mention_occurrence()]),
+            json.dumps(
+                [mention_occurrence()], ensure_ascii=False, separators=(",", ":")
+            ),
+        )
+        invalid = field.bound_data("{", [])
+        self.assertEqual(field.prepare_value(invalid), "{")
+
+    def test_invalid_values_use_one_generic_validation_message(self):
+        from wagtail.admin.forms.comment_mentions import CommentMentionsField
+
+        field = CommentMentionsField(required=False)
+        oversized = json.dumps(["é" * MAX_MENTION_JSON_BYTES], ensure_ascii=False)
+        self.assertGreater(len(oversized.encode("utf-8")), MAX_MENTION_JSON_BYTES)
+
+        for name, value in (
+            ("blank", ""),
+            ("malformed", "{"),
+            ("oversized", oversized),
+            ("invalid-utf8", "\ud800"),
+        ):
+            with self.subTest(name=name):
+                with self.assertRaisesMessage(
+                    ValidationError, "Enter a valid mention list."
+                ):
+                    field.clean(value)
+
+    def test_oversize_is_rejected_before_json_parsing(self):
+        from wagtail.admin.forms.comment_mentions import CommentMentionsField
+
+        field = CommentMentionsField(required=False)
+        oversized = "é" * (MAX_MENTION_JSON_BYTES // 2 + 1)
+
+        with mock.patch("django.forms.fields.json.loads") as loads:
+            with self.assertRaisesMessage(
+                ValidationError, "Enter a valid mention list."
+            ):
+                field.to_python(oversized)
+
+        loads.assert_not_called()
+
+    def test_oversize_is_not_parsed_when_redisplaying_bound_data(self):
+        from wagtail.admin.forms.comment_mentions import CommentMentionsField
+
+        field = CommentMentionsField(required=False)
+        oversized = "é" * (MAX_MENTION_JSON_BYTES // 2 + 1)
+
+        with mock.patch("django.forms.fields.json.loads") as loads:
+            bound_value = field.bound_data(oversized, [])
+
+        loads.assert_not_called()
+        self.assertEqual(field.prepare_value(bound_value), oversized)
+
+    def test_parser_resource_errors_use_the_generic_validation_message(self):
+        from wagtail.admin.forms.comment_mentions import CommentMentionsField
+
+        field = CommentMentionsField(required=False)
+        value = f"[{'1' * 5000}]"
+
+        self.assertLess(len(value.encode("utf-8")), MAX_MENTION_JSON_BYTES)
+        with self.assertRaisesMessage(ValidationError, "Enter a valid mention list."):
+            field.clean(value)
+
+    def test_parser_recursion_errors_use_the_generic_validation_message(self):
+        from wagtail.admin.forms.comment_mentions import CommentMentionsField
+
+        field = CommentMentionsField(required=False)
+
+        with mock.patch("django.forms.fields.json.loads", side_effect=RecursionError):
+            with self.assertRaisesMessage(
+                ValidationError, "Enter a valid mention list."
+            ):
+                field.clean("[]")
+
+    def test_bound_data_preserves_escaped_surrogates_without_decoding(self):
+        from wagtail.admin.forms.comment_mentions import CommentMentionsField
+
+        field = CommentMentionsField(required=False)
+        value = '["\\ud800"]'
+
+        prepared = field.prepare_value(field.bound_data(value, []))
+
+        self.assertEqual(prepared, value)
+        prepared.encode("utf-8")
+
+
 class TestMentionLabels(TestCase):
     def test_current_configured_email_is_normalized_for_the_label(self):
         user = self._make_user(email=" jo\t.smith@example.com ")
@@ -313,12 +442,11 @@ class TestMentionLabels(TestCase):
         user = self._make_user(
             email="", first_name="Jo", last_name="  Smith", username="jsmith"
         )
-        username_only = self._make_user(email="", username="jsmith")
+        cases = [(user, "@Jo Smith")]
+        if get_user_model().USERNAME_FIELD != get_user_model().get_email_field_name():
+            cases.append((self._make_user(email="", username="jsmith"), "@jsmith"))
 
-        for candidate, expected in (
-            (user, "@Jo Smith"),
-            (username_only, "@jsmith"),
-        ):
+        for candidate, expected in cases:
             with self.subTest(expected=expected):
                 self.assertEqual(normalize_mention_label(candidate), expected)
 

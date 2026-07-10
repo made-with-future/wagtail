@@ -17,7 +17,7 @@ class CommentPanel(Panel):
                     "form": CommentForm,
                     "fields": ["text", "contentpath", "position", "mentions"],
                     "formset_name": "comments",
-                    "inherit_kwargs": ["for_user"],
+                    "inherit_kwargs": ["for_user", "parent_page"],
                 }
             },
         }
