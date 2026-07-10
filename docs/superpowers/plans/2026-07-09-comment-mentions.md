@@ -317,7 +317,7 @@ def normalize_mention_label(user) -> str:
     return truncate_utf16(f"@{identity}", MAX_MENTION_LABEL_UTF16)
 ```
 
-Complete `validate_mention_occurrences` with this fixed order: require a list; enforce count; require exactly five fields; canonicalize UUID text; reject boolean/collection user IDs; canonicalize through `get_user_model()._meta.pk.to_python`; require integer non-boolean offsets; require sorted non-overlapping ranges; require UTF-16 boundaries; require `utf16_slice(text, start, end) == label`; and return a tuple sorted by `(start, end, key)`. Implement `validate_retained_mentions` by key, `compare_mentions` by key, `sanitize_stored_mentions` as per-entry defensive validation with one warning per invalid entry, and `split_text_by_mentions` as escaped-data-ready `(text, is_mention)` segments without producing markup.
+Complete `validate_mention_occurrences` with this fixed order: require a list; enforce count and compact UTF-8 size; require exactly five fields; canonicalize UUID text; reject boolean/collection user IDs; convert through `get_user_model()._meta.pk.to_python`, prepare through that field, and run its validators against the prepared value so out-of-range IDs fail before a database query; require integer non-boolean offsets; require sorted non-overlapping ranges; require UTF-16 boundaries; require `utf16_slice(text, start, end) == label`; and return a tuple sorted by `(start, end, key)`. Preserve a submitted PK string when it matches either the parsed or prepared round-tripping representation. Implement `validate_retained_mentions` by key, `compare_mentions` by key, `sanitize_stored_mentions` as per-entry defensive validation with one warning per invalid entry, and `split_text_by_mentions` as escaped-data-ready `(text, is_mention)` segments without producing markup.
 
 - [ ] **Step 4: Run focused tests and formatting**
 
@@ -413,7 +413,7 @@ def test_exact_message_lookup_rows_are_unique_and_queryable(self):
     )
 ```
 
-Also assert repeated `(message, user)` insertion raises `IntegrityError`, deleting the target removes both lookup rows without changing stored occurrence JSON, neither lookup model appears in `Comment._meta.get_fields()` / `CommentReply._meta.get_fields()`, and an ordinary `comment.save()` updates text after restoring the clean-main `Comment.save()` implementation.
+Also assert repeated `(message, user)` insertion raises `IntegrityError` while the same target on a second message and a second target on the same message remain valid. Deleting the target removes both lookup rows without changing stored occurrence JSON, neither lookup model appears in `Comment._meta.get_fields()` / `CommentReply._meta.get_fields()`, comment and reply occurrences both round-trip, and an ordinary `comment.save()` preserves staged modelcluster reply add/edit/delete operations. Add a focused regression for the standard `comment.save(update_fields=["mentions"])` string-name API because Task 4 relies on it.
 
 - [ ] **Step 2: Run and verify the relation-based implementation fails**
 
@@ -482,7 +482,7 @@ class CommentReplyMention(models.Model):
         verbose_name_plural = _("comment reply mentions")
 ```
 
-Export both lookup models from `wagtail/models/__init__.py`, delete `notified_at`, remove the prototype's `get_all_child_relations` import, and restore `Comment.save()` to clean main. `related_name="+"` keeps the lookup foreign keys out of reverse field discovery while direct `CommentMention.objects` / `CommentReplyMention.objects` queries retain indexed forward and inverse lookup.
+Export both lookup models from `wagtail/models/__init__.py`, delete `notified_at`, remove the prototype's `get_all_child_relations` import, and restore clean-main `Comment.save()` behavior while normalizing either standard string field names or internal field objects before filtering `position`/`id`. `related_name="+"` keeps the lookup foreign keys out of reverse field discovery while direct `CommentMention.objects` / `CommentReplyMention.objects` queries retain indexed forward and inverse lookup.
 
 Replace migration `0098_commentmention.py` with:
 
@@ -654,7 +654,7 @@ def test_explicit_empty_list_removes_mentions(self):
     )
 ```
 
-Cover: unchanged browser payload for another author; resolve/reposition with omitted and hydrated fields; an omitted field redisplaying its canonical initial value when an unrelated page field fails; retained target rename/deactivation/deletion/permission loss; malformed/blank/oversize JSON; comment/reply parity; repeated occurrences collapsing to one lookup row; explicit clearing removing the exact message's lookup row; deleted targets not being recreated; invalid stored entries sanitized without dirtying another-author forms; author JSON remaining exactly name/avatar; and current email appearing only under `mentioned_users`.
+Cover: unchanged browser payload for another author; resolve/reposition with omitted and hydrated fields; an omitted field redisplaying its canonical initial value when an unrelated page field fails; retained target rename/deactivation/deletion/permission loss; malformed/blank/oversize/digit-limit/recursive JSON and escaped-surrogate redisplay; comment/reply parity; repeated occurrences collapsing to one lookup row; prepared/display PK aliases resolving to one target while retaining both exact metadata keys; explicit clearing removing the exact message's lookup row; deleted targets not being recreated; a deleted parent skipping nested reply synchronization; invalid stored entries sanitized without dirtying another-author form; all user wire IDs remaining strings under the UUID user model; author JSON remaining exactly name/avatar with the current editor retained; mention-only targets excluded from authors; and current email appearing only under `mentioned_users`. Assert serialization performs one profile-aware author query and one mentioned-user query regardless of message count.
 
 Add an exact live-metadata assertion:
 
@@ -691,6 +691,7 @@ import json
 
 from django import forms
 from django.core.exceptions import ValidationError
+from django.forms.fields import InvalidJSONInput
 from django.utils.translation import gettext_lazy as _
 
 from wagtail.admin.comment_mentions import (
@@ -714,23 +715,44 @@ class CommentMentionsInput(forms.HiddenInput):
 
 class CommentMentionsField(forms.JSONField):
     widget = CommentMentionsInput
+    default_error_messages = {
+        "invalid": _("Enter a valid mention list."),
+    }
 
     def bound_data(self, data, initial):
         if data is MENTIONS_OMITTED:
             return initial
-        return super().bound_data(data, initial)
+        # Hidden JSON is validated during cleaning. Preserve explicit bound text
+        # verbatim so redisplay never performs a second, resource-unbounded parse.
+        return InvalidJSONInput(data if isinstance(data, str) else "")
+
+    def _validate_raw_value(self, value):
+        if not isinstance(value, str) or not value:
+            raise ValidationError(self.error_messages["invalid"], code="invalid")
+        try:
+            value_size = len(value.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise ValidationError(
+                self.error_messages["invalid"], code="invalid"
+            ) from error
+        if value_size > MAX_MENTION_JSON_BYTES:
+            raise ValidationError(self.error_messages["invalid"], code="invalid")
 
     def to_python(self, value):
         if value is MENTIONS_OMITTED:
             return MENTIONS_OMITTED
-        if not isinstance(value, str) or not value:
-            raise ValidationError(_("Enter a valid mention list."))
-        if len(value.encode("utf-8")) > MAX_MENTION_JSON_BYTES:
-            raise ValidationError(_("Enter a valid mention list."))
-        return super().to_python(value)
+        self._validate_raw_value(value)
+        try:
+            return super().to_python(value)
+        except (RecursionError, ValueError, ValidationError) as error:
+            raise ValidationError(
+                self.error_messages["invalid"], code="invalid"
+            ) from error
 
     def prepare_value(self, value):
-        return json.dumps(value, separators=(",", ":"))
+        if isinstance(value, InvalidJSONInput):
+            return value
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
     def has_changed(self, initial, data):
         if data is MENTIONS_OMITTED:
@@ -760,13 +782,16 @@ class MentionedMessageFormMixin:
         submitted = self.cleaned_data["mentions"]
         if submitted is MENTIONS_OMITTED:
             submitted = initial
-        current = list(
-            validate_mention_occurrences(
-                submitted,
-                text=self.cleaned_data.get("text", self.instance.text),
+        try:
+            current = list(
+                validate_mention_occurrences(
+                    submitted,
+                    text=self.cleaned_data.get("text", self.instance.text),
+                )
             )
-        )
-        validate_retained_mentions(initial, current)
+            validate_retained_mentions(initial, current)
+        except ValidationError as error:
+            raise ValidationError(_("Enter a valid mention list.")) from error
         self.mention_changes = compare_mentions(initial, current)
         return current
 ```
@@ -811,7 +836,11 @@ Add one formset-level synchronization method and call it only after the normal m
 ```python
 def sync_mention_lookups(self):
     for form in self.forms:
-        if form not in self.deleted_forms and form.instance.pk:
+        if form in self.deleted_forms:
+            # The database cascade has already removed its replies; do not
+            # recreate lookup rows from in-memory nested forms.
+            continue
+        if form.instance.pk:
             sync_message_mention_lookups(
                 message=form.instance,
                 occurrences=form.cleaned_data["mentions"],
@@ -825,18 +854,20 @@ def sync_mention_lookups(self):
                 )
 ```
 
-Implement `sync_message_mention_lookups` in `wagtail/admin/comment_mentions.py`. Select the model/foreign-key name from `Comment` versus `CommentReply`, fetch all still-existing target users in one query, delete rows not in that set, and bulk-create missing `(message, user)` rows with `ignore_conflicts=True`. Never recreate a deleted target from retained JSON and never infer notification novelty from row insertion.
+Implement `sync_message_mention_lookups` in `wagtail/admin/comment_mentions.py`. Select the model/foreign-key name from `Comment` versus `CommentReply`, fetch all still-existing target users in one query using the occurrence IDs, delete rows not in that resolved user set, and bulk-create missing `(message, user)` rows with `ignore_conflicts=True`. Compare resolved user objects/prepared identities rather than `str(user.pk)` so configured prepared/display aliases collapse to one row. Never recreate a deleted target from retained JSON and never infer notification novelty from row insertion.
 
 Remove the prototype `save_mentions`, relation-derived author expansion, author email, and user-edit URLs. After serializing every comment and reply, collect all sanitized occurrence user IDs and bulk-load current users once. Emit:
 
 ```python
 comments_data["mentioned_users"] = {
-    str(user.pk): {"email": current_mention_email(user)}
-    for user in mentioned_users
+    occurrence_user_id: {"email": current_mention_email(user)}
+    for occurrence_user_id, user in resolved_occurrence_users.items()
 }
 ```
 
-Create serialization must not reverse an edit URL while `page.pk` is `None`; Task 5 supplies the correct two URL variants.
+Resolve each exact occurrence ID through the configured PK field's prepared identity before building this map, so supported aliases may point to the same user without rewriting JSON. Keep the current editor plus actual comment/reply authors in `authors`, but never add a mention-only target there. Stringify all user IDs in the wire payload. Create serialization must not reverse an edit URL while `page.pk` is `None`; Task 5 supplies the correct two URL variants.
+
+The recorded Task 3 base already makes the prototype edit lifecycle unusable because that lifecycle treats the new JSON list as a related manager. Task 4 removes those relation helpers but intentionally does not create a temporary compatibility shim: Task 5 replaces the prototype endpoint, Tasks 6 and 7 replace change/delivery planning, and Task 8 removes the remaining `save_mentions()` / `notified_at` calls while integrating synchronization transactionally. Tasks 4 through 7 are coherent review slices, not standalone runnable edit-lifecycle checkpoints.
 
 - [ ] **Step 5: Verify form, privacy, UUID, and create-GET regressions**
 
