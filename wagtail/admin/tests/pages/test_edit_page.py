@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import re
 from unittest import mock
 
 from django.conf import settings
@@ -19,7 +20,6 @@ from wagtail.admin.models import EditingSession
 from wagtail.exceptions import PageClassNotFoundError
 from wagtail.models import (
     Comment,
-    CommentMention,
     CommentReply,
     GroupPagePermission,
     Locale,
@@ -633,6 +633,7 @@ class TestPageEdit(WagtailTestUtils, TestCase):
                 "comments": [],
                 "user": str(self.user.pk),
                 "authors": {},
+                "mentioned_users": {},
             },
         )
 
@@ -4591,10 +4592,19 @@ class TestCommenting(WagtailTestUtils, TestCase):
         self.assertEqual(log_entry.data["comment"]["contentpath"], comment.contentpath)
         self.assertEqual(log_entry.data["comment"]["text"], comment.text)
 
-    def test_new_comment_with_mentions(self):
+    def test_new_comment_with_mentions_records_audit_delta(self):
         mentioned_user = self.add_page_editor(
             "mentioned-user", email="mentioned-user@example.com"
         )
+        label = f"@{mentioned_user.email}"
+        text = f"A test comment {label}"
+        occurrence = {
+            "key": "29cc6a1f-00ed-41d7-94b1-d46a947962cb",
+            "user_id": str(mentioned_user.pk),
+            "start": len("A test comment "),
+            "end": len(text),
+            "label": label,
+        }
 
         post_data = {
             "title": "I've been edited!",
@@ -4608,8 +4618,8 @@ class TestCommenting(WagtailTestUtils, TestCase):
             "comments-0-resolved": "",
             "comments-0-id": "",
             "comments-0-contentpath": "title",
-            "comments-0-text": "A test comment",
-            "comments-0-mentions": json.dumps([mentioned_user.pk]),
+            "comments-0-text": text,
+            "comments-0-mentions": json.dumps([occurrence]),
             "comments-0-position": "",
             "comments-0-replies-TOTAL_FORMS": "0",
             "comments-0-replies-INITIAL_FORMS": "0",
@@ -4626,15 +4636,21 @@ class TestCommenting(WagtailTestUtils, TestCase):
         )
 
         comment = self.child_page.wagtail_admin_comments.get()
-        mention = comment.mentions.get()
-        self.assertEqual(mention.user, mentioned_user)
-        self.assertIsNotNone(mention.notified_at)
+        self.assertEqual(comment.mentions, [occurrence])
 
-        recipients = [email.to for email in mail.outbox]
-        self.assertIn([self.subscriber.email], recipients)
-        self.assertIn([mentioned_user.email], recipients)
-        self.assertEqual(len(mail.outbox), 2)
+        self.assertEqual([email.to for email in mail.outbox], [[self.subscriber.email]])
         self.assertNeverEmailedWrongUser()
+
+        log_entry = PageLogEntry.objects.get(action="wagtail.comments.create")
+        self.assertEqual(
+            log_entry.data["mentions"],
+            {
+                "added": [
+                    {"key": occurrence["key"], "user_id": str(mentioned_user.pk)}
+                ],
+                "removed": [],
+            },
+        )
 
     def test_new_comment_json(self):
         post_data = {
@@ -4761,23 +4777,36 @@ class TestCommenting(WagtailTestUtils, TestCase):
         self.assertEqual(log_entry.data["comment"]["contentpath"], comment.contentpath)
         self.assertEqual(log_entry.data["comment"]["text"], comment.text)
 
-    def test_edit_comment_only_notifies_new_mentions(self):
+    def test_mention_only_comment_edit_is_audited_without_notification(self):
         previously_mentioned_user = self.add_page_editor(
             "previous-mention", email="previous-mention@example.com"
         )
         newly_mentioned_user = self.add_page_editor(
             "new-mention", email="new-mention@example.com"
         )
+        previous_label = f"@{previously_mentioned_user.email}"
+        new_label = f"@{newly_mentioned_user.email}"
+        text = f"{previous_label} and {new_label}"
+        previous_occurrence = {
+            "key": "f4cf21fd-7dad-40e0-83da-d90310d2425f",
+            "user_id": str(previously_mentioned_user.pk),
+            "start": 0,
+            "end": len(previous_label),
+            "label": previous_label,
+        }
+        new_occurrence = {
+            "key": "29cc6a1f-00ed-41d7-94b1-d46a947962cb",
+            "user_id": str(newly_mentioned_user.pk),
+            "start": len(previous_label) + len(" and "),
+            "end": len(text),
+            "label": new_label,
+        }
         comment = Comment.objects.create(
             page=self.child_page,
             user=self.user,
-            text="A test comment",
+            text=text,
+            mentions=[previous_occurrence],
             contentpath="title",
-        )
-        CommentMention.objects.create(
-            comment=comment,
-            user=previously_mentioned_user,
-            notified_at=timezone.now(),
         )
 
         post_data = {
@@ -4792,10 +4821,8 @@ class TestCommenting(WagtailTestUtils, TestCase):
             "comments-0-resolved": "",
             "comments-0-id": str(comment.id),
             "comments-0-contentpath": "title",
-            "comments-0-text": "Edited",
-            "comments-0-mentions": json.dumps(
-                [previously_mentioned_user.pk, newly_mentioned_user.pk]
-            ),
+            "comments-0-text": text,
+            "comments-0-mentions": json.dumps([previous_occurrence, new_occurrence]),
             "comments-0-position": "",
             "comments-0-replies-TOTAL_FORMS": "0",
             "comments-0-replies-INITIAL_FORMS": "0",
@@ -4811,18 +4838,35 @@ class TestCommenting(WagtailTestUtils, TestCase):
             response, reverse("wagtailadmin_pages:edit", args=[self.child_page.id])
         )
 
-        recipients = [email.to for email in mail.outbox]
-        self.assertEqual(recipients, [[newly_mentioned_user.email]])
+        self.assertEqual(len(mail.outbox), 0)
         self.assertNeverEmailedWrongUser()
 
         comment.refresh_from_db()
+        self.assertEqual(comment.mentions, [previous_occurrence, new_occurrence])
+        log_entry = PageLogEntry.objects.get(action="wagtail.comments.edit")
         self.assertEqual(
-            set(comment.mentions.values_list("user_id", flat=True)),
-            {previously_mentioned_user.pk, newly_mentioned_user.pk},
+            log_entry.data["mentions"],
+            {
+                "added": [
+                    {
+                        "key": new_occurrence["key"],
+                        "user_id": str(newly_mentioned_user.pk),
+                    }
+                ],
+                "removed": [],
+            },
         )
-        self.assertFalse(comment.mentions.filter(notified_at__isnull=True).exists())
 
     def test_new_comment_with_inaccessible_mention_is_rejected(self):
+        label = f"@{self.never_emailed_user.email}"
+        text = f"A test comment {label}"
+        occurrence = {
+            "key": "29cc6a1f-00ed-41d7-94b1-d46a947962cb",
+            "user_id": str(self.never_emailed_user.pk),
+            "start": len("A test comment "),
+            "end": len(text),
+            "label": label,
+        }
         post_data = {
             "title": "I've been edited!",
             "content": "Some content",
@@ -4835,8 +4879,8 @@ class TestCommenting(WagtailTestUtils, TestCase):
             "comments-0-resolved": "",
             "comments-0-id": "",
             "comments-0-contentpath": "title",
-            "comments-0-text": "A test comment",
-            "comments-0-mentions": json.dumps([self.never_emailed_user.pk]),
+            "comments-0-text": text,
+            "comments-0-mentions": json.dumps([occurrence]),
             "comments-0-position": "",
             "comments-0-replies-TOTAL_FORMS": "0",
             "comments-0-replies-INITIAL_FORMS": "0",
@@ -4850,7 +4894,7 @@ class TestCommenting(WagtailTestUtils, TestCase):
 
         self.assertEqual(
             response.context["form"].formsets["comments"].errors,
-            [{"mentions": ["Select a valid user to mention."]}],
+            [{"mentions": ["Enter a valid mention list."]}],
         )
         self.assertFalse(self.child_page.wagtail_admin_comments.exists())
         self.assertEqual(len(mail.outbox), 0)
@@ -5353,18 +5397,21 @@ class TestCommenting(WagtailTestUtils, TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
+        expected_result = {
+            "id": str(mentioned_user.pk),
+            "label": "@mentionable@example.com",
+            "email": "mentionable@example.com",
+        }
+        username = str(mentioned_user.get_username())
+        normalized_username = re.sub(r"\s+", " ", username).strip()
+        if normalized_username and normalized_username not in {
+            expected_result["email"],
+            expected_result["label"].removeprefix("@"),
+        }:
+            expected_result["username"] = username
         self.assertEqual(
             response.json(),
-            {
-                "results": [
-                    {
-                        "id": str(mentioned_user.pk),
-                        "label": "@mentionable@example.com",
-                        "email": "mentionable@example.com",
-                        "username": mentioned_user.get_username(),
-                    }
-                ]
-            },
+            {"results": [expected_result]},
         )
 
     def test_comment_mention_suggestions_require_page_edit_permission(self):

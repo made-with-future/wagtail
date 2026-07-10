@@ -2673,6 +2673,23 @@ class PageLogEntry(BaseLogEntry):
             return super().message
 
 
+def _mention_changes_for_log(mention_changes):
+    if mention_changes is None:
+        return None
+
+    added = [
+        {"key": str(occurrence["key"]), "user_id": str(occurrence["user_id"])}
+        for occurrence in mention_changes.added
+    ]
+    removed = [
+        {"key": str(occurrence["key"]), "user_id": str(occurrence["user_id"])}
+        for occurrence in mention_changes.removed
+    ]
+    if not added and not removed:
+        return None
+    return {"added": added, "removed": removed}
+
+
 class Comment(ClusterableModel):
     """
     A comment on a field, or a field within a streamfield block
@@ -2753,19 +2770,23 @@ class Comment(ClusterableModel):
                 return result
         return super().save(update_fields=update_fields, **kwargs)
 
-    def _log(self, action, page_revision=None, user=None):
+    def _log(self, action, page_revision=None, user=None, mention_changes=None):
+        data = {
+            "comment": {
+                "id": self.pk,
+                "contentpath": self.contentpath,
+                "text": self.text,
+            }
+        }
+        mention_data = _mention_changes_for_log(mention_changes)
+        if mention_data is not None:
+            data["mentions"] = mention_data
         log(
             instance=self.page,
             action=action,
             user=user,
             revision=page_revision,
-            data={
-                "comment": {
-                    "id": self.pk,
-                    "contentpath": self.contentpath,
-                    "text": self.text,
-                }
-            },
+            data=data,
         )
 
     def log_create(self, **kwargs):
@@ -2847,23 +2868,27 @@ class CommentReply(models.Model):
     def __str__(self):
         return f"CommentReply left by '{self.user}': '{self.text}'"
 
-    def _log(self, action, page_revision=None, user=None):
+    def _log(self, action, page_revision=None, user=None, mention_changes=None):
+        data = {
+            "comment": {
+                "id": self.comment.pk,
+                "contentpath": self.comment.contentpath,
+                "text": self.comment.text,
+            },
+            "reply": {
+                "id": self.pk,
+                "text": self.text,
+            },
+        }
+        mention_data = _mention_changes_for_log(mention_changes)
+        if mention_data is not None:
+            data["mentions"] = mention_data
         log(
             instance=self.comment.page,
             action=action,
             user=user,
             revision=page_revision,
-            data={
-                "comment": {
-                    "id": self.comment.pk,
-                    "contentpath": self.comment.contentpath,
-                    "text": self.comment.text,
-                },
-                "reply": {
-                    "id": self.pk,
-                    "text": self.text,
-                },
-            },
+            data=data,
         )
 
     def log_create(self, **kwargs):

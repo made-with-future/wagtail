@@ -18,6 +18,10 @@ from django.views.generic.base import View
 from wagtail.actions.publish_page_revision import PublishPageRevisionAction
 from wagtail.admin import messages
 from wagtail.admin.action_menu import PageActionMenu
+from wagtail.admin.commenting import (
+    collect_commenting_changes,
+    log_commenting_changes,
+)
 from wagtail.admin.mail import send_notification
 from wagtail.admin.models import EditingSession
 from wagtail.admin.telepath import JSContext
@@ -39,7 +43,6 @@ from wagtail.locks import BasicLock, ScheduledForPublishLock, WorkflowLock
 from wagtail.models import (
     COMMENTS_RELATION_NAME,
     Comment,
-    CommentMention,
     CommentReply,
     Page,
     PageSubscription,
@@ -90,177 +93,72 @@ class EditView(
         messages.success(self.request, message)
 
     def get_commenting_changes(self):
-        """
-        Finds comments that have been changed during this request.
-
-        Returns a tuple of 5 lists:
-         - New comments
-         - Deleted comments
-         - Resolved comments
-         - Edited comments
-         - Replied comments (dict containing the instance and list of replies)
-        """
-        # Get changes
-        comments_formset = self.form.formsets["comments"]
-        comments_formset.save_mentions()
-        new_comments = comments_formset.new_objects
-        deleted_comments = comments_formset.deleted_objects
-
-        # Assume any changed comments that are resolved were only just resolved
-        resolved_comments = []
-        edited_comments = []
-        for changed_comment, changed_fields in comments_formset.changed_objects:
-            if changed_comment.resolved_at and "resolved" in changed_fields:
-                resolved_comments.append(changed_comment)
-
-            if "text" in changed_fields:
-                edited_comments.append(changed_comment)
-
-        new_mention_comment_ids = {
-            comment.pk for comment in new_comments if comment.pk is not None
-        }
-        new_mention_comment_ids.update(
-            changed_comment.pk
-            for changed_comment, changed_fields in comments_formset.changed_objects
-            if "mentions" in changed_fields
-        )
-        new_mentions = list(
-            CommentMention.objects.filter(
-                comment_id__in=new_mention_comment_ids,
-                notified_at__isnull=True,
-            ).select_related("comment", "user")
-        )
-
-        new_replies = []
-        deleted_replies = []
-        edited_replies = []
-        for comment_form in comments_formset.forms:
-            # New
-            replies = getattr(comment_form.formsets["replies"], "new_objects", [])
-            if replies:
-                new_replies.append((comment_form.instance, replies))
-
-            # Deleted
-            replies = getattr(comment_form.formsets["replies"], "deleted_objects", [])
-            if replies:
-                deleted_replies.append((comment_form.instance, replies))
-
-            # Edited
-            replies = getattr(comment_form.formsets["replies"], "changed_objects", [])
-            replies = [
-                reply for reply, changed_fields in replies if "text" in changed_fields
-            ]
-            if replies:
-                edited_replies.append((comment_form.instance, replies))
-
-        return {
-            "new_comments": new_comments,
-            "deleted_comments": deleted_comments,
-            "resolved_comments": resolved_comments,
-            "edited_comments": edited_comments,
-            "new_replies": new_replies,
-            "deleted_replies": deleted_replies,
-            "edited_replies": edited_replies,
-            "new_mentions": new_mentions,
-        }
+        return collect_commenting_changes(self.form.formsets["comments"])
 
     def send_commenting_notifications(self, changes):
         """
         Sends notifications about any changes to comments to anyone who is subscribed.
         """
         relevant_comment_ids = []
+        relevant_comment_ids.extend(comment.pk for comment in changes.resolved_comments)
         relevant_comment_ids.extend(
-            comment.pk for comment in changes["resolved_comments"]
-        )
-        relevant_comment_ids.extend(
-            comment.pk for comment, replies in changes["new_replies"]
-        )
-
-        has_comment_notification_changes = (
-            bool(changes["new_comments"])
-            or bool(changes["deleted_comments"])
-            or bool(changes["resolved_comments"])
-            or bool(changes["new_replies"])
+            comment.pk for comment, replies in changes.new_replies
         )
 
         # Skip if no changes were made
         # Note: We don't email about edited comments so ignore those here
-        if not has_comment_notification_changes and not changes["new_mentions"]:
+        if (
+            not changes.new_comments
+            and not changes.deleted_comments
+            and not changes.resolved_comments
+            and not changes.new_replies
+        ):
             return
 
-        global_recipient_users = []
-        global_recipient_user_ids = set()
-        thread_users = []
-        thread_user_ids = set()
+        # Get global page comment subscribers
+        subscribers = PageSubscription.objects.filter(
+            page=self.page, comment_notifications=True
+        ).select_related("user")
+        global_recipient_users = [
+            subscriber.user
+            for subscriber in subscribers
+            if subscriber.user != self.request.user
+        ]
 
-        if has_comment_notification_changes:
-            # Get global page comment subscribers
-            subscribers = PageSubscription.objects.filter(
-                page=self.page, comment_notifications=True
-            ).select_related("user")
-            global_recipient_users = [
-                subscriber.user
-                for subscriber in subscribers
-                if subscriber.user != self.request.user
-            ]
-            global_recipient_user_ids = {user.pk for user in global_recipient_users}
-
-            # Get subscribers to individual threads
-            replies = CommentReply.objects.filter(comment_id__in=relevant_comment_ids)
-            comments = Comment.objects.filter(id__in=relevant_comment_ids)
-            thread_users = (
-                get_user_model()
-                .objects.exclude(pk=self.request.user.pk)
-                .exclude(pk__in=subscribers.values_list("user_id", flat=True))
-                .filter(
-                    Q(comment_replies__comment_id__in=relevant_comment_ids)
-                    | Q(
-                        **{
-                            ("%s__pk__in" % COMMENTS_RELATION_NAME): (
-                                relevant_comment_ids
-                            )
-                        }
-                    )
-                )
-                .prefetch_related(
-                    Prefetch("comment_replies", queryset=replies),
-                    Prefetch(COMMENTS_RELATION_NAME, queryset=comments),
-                )
+        # Get subscribers to individual threads
+        replies = CommentReply.objects.filter(comment_id__in=relevant_comment_ids)
+        comments = Comment.objects.filter(id__in=relevant_comment_ids)
+        thread_users = (
+            get_user_model()
+            .objects.exclude(pk=self.request.user.pk)
+            .exclude(pk__in=subscribers.values_list("user_id", flat=True))
+            .filter(
+                Q(comment_replies__comment_id__in=relevant_comment_ids)
+                | Q(**{("%s__pk__in" % COMMENTS_RELATION_NAME): relevant_comment_ids})
             )
-
-            thread_users = [
-                (
-                    user,
-                    set(
-                        list(user.comment_replies.values_list("comment_id", flat=True))
-                        + list(
-                            getattr(user, COMMENTS_RELATION_NAME).values_list(
-                                "pk", flat=True
-                            )
-                        )
-                    ),
-                )
-                for user in thread_users
-            ]
-            thread_user_ids = {user.pk for user, threads in thread_users}
-
-        mention_comments_by_user = {}
-        for mention in changes["new_mentions"]:
-            if (
-                mention.user_id == self.request.user.pk
-                or mention.user_id in global_recipient_user_ids
-                or mention.user_id in thread_user_ids
-            ):
-                continue
-
-            mention_comments_by_user.setdefault(mention.user, []).append(
-                mention.comment
+            .prefetch_related(
+                Prefetch("comment_replies", queryset=replies),
+                Prefetch(COMMENTS_RELATION_NAME, queryset=comments),
             )
+        )
 
         # Skip if no recipients
-        if not (global_recipient_users or thread_users or mention_comments_by_user):
-            self.mark_comment_mentions_notified(changes["new_mentions"])
+        if not (global_recipient_users or thread_users):
             return
+        thread_users = [
+            (
+                user,
+                set(
+                    list(user.comment_replies.values_list("comment_id", flat=True))
+                    + list(
+                        getattr(user, COMMENTS_RELATION_NAME).values_list(
+                            "pk", flat=True
+                        )
+                    )
+                ),
+            )
+            for user in thread_users
+        ]
 
         mailed_users = set()
 
@@ -283,12 +181,12 @@ class EditView(
                     "editor": self.request.user,
                     "new_comments": [
                         comment
-                        for comment in changes["new_comments"]
+                        for comment in changes.new_comments
                         if comment.pk in threads
                     ],
                     "resolved_comments": [
                         comment
-                        for comment in changes["resolved_comments"]
+                        for comment in changes.resolved_comments
                         if comment.pk in threads
                     ],
                     "deleted_comments": [],
@@ -297,83 +195,37 @@ class EditView(
                             "comment": comment,
                             "replies": replies,
                         }
-                        for comment, replies in changes["new_replies"]
+                        for comment, replies in changes.new_replies
                         if comment.pk in threads
                     ],
                 },
             )
 
-        for user, mentioned_comments in mention_comments_by_user.items():
-            send_notification(
-                [user],
-                "updated_comments",
-                {
-                    "page": self.page,
-                    "editor": self.request.user,
-                    "new_comments": mentioned_comments,
-                    "resolved_comments": [],
-                    "deleted_comments": [],
-                    "replied_comments": [],
-                },
-            )
-
-        sent = None
-        if has_comment_notification_changes:
-            sent = send_notification(
-                global_recipient_users,
-                "updated_comments",
-                {
-                    "page": self.page,
-                    "editor": self.request.user,
-                    "new_comments": changes["new_comments"],
-                    "resolved_comments": changes["resolved_comments"],
-                    "deleted_comments": changes["deleted_comments"],
-                    "replied_comments": [
-                        {
-                            "comment": comment,
-                            "replies": replies,
-                        }
-                        for comment, replies in changes["new_replies"]
-                    ],
-                },
-            )
-        self.mark_comment_mentions_notified(changes["new_mentions"])
-        return sent
-
-    def mark_comment_mentions_notified(self, mentions):
-        mention_ids = [mention.pk for mention in mentions]
-        if mention_ids:
-            CommentMention.objects.filter(pk__in=mention_ids).update(
-                notified_at=timezone.now()
-            )
+        return send_notification(
+            global_recipient_users,
+            "updated_comments",
+            {
+                "page": self.page,
+                "editor": self.request.user,
+                "new_comments": changes.new_comments,
+                "resolved_comments": changes.resolved_comments,
+                "deleted_comments": changes.deleted_comments,
+                "replied_comments": [
+                    {
+                        "comment": comment,
+                        "replies": replies,
+                    }
+                    for comment, replies in changes.new_replies
+                ],
+            },
+        )
 
     def log_commenting_changes(self, changes, revision):
-        """
-        Generates log entries for any changes made to comments or replies.
-        """
-        for comment in changes["new_comments"]:
-            comment.log_create(page_revision=revision, user=self.request.user)
-
-        for comment in changes["edited_comments"]:
-            comment.log_edit(page_revision=revision, user=self.request.user)
-
-        for comment in changes["resolved_comments"]:
-            comment.log_resolve(page_revision=revision, user=self.request.user)
-
-        for comment in changes["deleted_comments"]:
-            comment.log_delete(page_revision=revision, user=self.request.user)
-
-        for comment, replies in changes["new_replies"]:
-            for reply in replies:
-                reply.log_create(page_revision=revision, user=self.request.user)
-
-        for comment, replies in changes["edited_replies"]:
-            for reply in replies:
-                reply.log_edit(page_revision=revision, user=self.request.user)
-
-        for comment, replies in changes["deleted_replies"]:
-            for reply in replies:
-                reply.log_delete(page_revision=revision, user=self.request.user)
+        return log_commenting_changes(
+            changes=changes,
+            revision=revision,
+            actor=self.request.user,
+        )
 
     def get_edit_message_button(self):
         return messages.button(self.get_edit_url(), _("Edit"))
