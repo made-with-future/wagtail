@@ -1454,31 +1454,41 @@ git commit -m "Notify users about exact comment mentions"
 - Modify: `wagtail/admin/forms/comments.py`
 - Modify: `wagtail/admin/tests/pages/test_edit_page.py`
 - Modify: `wagtail/admin/tests/pages/test_create_page.py`
+- Modify: `wagtail/admin/tests/test_workflows.py`
 
 **Interfaces:**
 - Consumes: form deltas, change collector, audit dispatcher, notification scheduler, actual-page candidate queryset.
-- Produces: no-partial-save edit/create actions for draft, JSON autosave, publish, submit, and workflow paths.
+- Produces: no-partial-save integration across the nine real action cores: edit `save_action` (HTML and Accept-JSON autosave/overwrite), `publish_action`, `submit_action`, `restart_workflow_action`, `perform_workflow_action`, and `cancel_workflow_action`; create `save_action` (HTML and Accept-JSON), `publish_action`, and `submit_action`. Publish and submit do not have separate JSON lifecycle handlers.
 
 - [ ] **Step 1: Add failing full-lifecycle regressions**
 
-Use real occurrence text/ranges in every payload; never submit a phantom ID with unrelated text. Add tests for:
+Use compact shared payload/occurrence helpers and real text/ranges in every payload; never duplicate giant POST dictionaries or submit a phantom ID with unrelated text. Add tests for:
 
 - top-level and reply mention create/edit/remove;
 - mention-only edit dirty/audit behavior;
 - ordinary save with another author's unchanged hydrated mentions;
-- retained target rename/deactivation/deletion/permission loss;
-- edit JSON autosave/save/publish/submit workflows;
-- create GET/save JSON/publish/submit with comment and reply mentions;
+- retained target rename, deactivation, or permission loss preserves the stored occurrence JSON and exact lookup row without a comment audit entry, mention delta, or notification; target deletion preserves stored JSON but cascades the lookup row and yields no live hydrated metadata, comment audit entry, mention delta, or notification;
+- edit HTML save, JSON save and revision overwrite, publish, submit, restart-from-needs-changes, real task workflow action, and cancel;
+- create HTML save, JSON save, publish, and submit with comment and reply mentions;
 - target permission loss between future validation and provisional save;
 - malformed/new-ineligible occurrence leaves no page/revision/comment/reply/audit/mail;
 - valid create/edit/remove synchronizes exact top-level/reply lookup rows, repeated occurrences collapse, and rollback leaves no partial lookup rows;
-- mail callback runs only after commit.
+- mail callback runs only after the `captureOnCommitCallbacks(execute=True)` context exits;
+- an ineligible top-level mention and an ineligible reply mention each leave an active workflow untouched during cancellation, while an unrelated invalid page field preserves Wagtail's existing cancel-anyway behavior.
+
+Across the action matrix, assert stored occurrence JSON, exact `CommentMention` / `CommentReplyMention` target sets, revision and audit identity, and direct mail after commit. Preserve ordinary subscriber behavior on edit actions. Create actions must instead assert direct-mention delivery, actor exclusion, and the newly saved actor subscription because no non-actor page subscription can predate the page. Reuse the real workflow setup patterns from `test_workflows.py` rather than mocking method selection.
+
+Add rollback-placement tests for all nine action cores by wrapping the real scheduler so it registers its `on_commit` callback and then raises. Because scheduling is the last database-lifecycle operation, these tests exercise real publish/workflow actions before the exception. In addition to unchanged row counts and no surviving callback/mail, edit cases must assert the original page title/content/live flags/latest-revision pointer, comment/reply text and occurrence JSON, exact lookup targets, subscription values, and workflow state values. Across the three create cases, configure the default privacy setting as login-only, password, and groups respectively so each rollback proves that real privacy rows and group links disappear; also assert unchanged parent `numchild`. This promise covers transactional database state and mention email scheduling, not arbitrary external effects produced by third-party hooks or signals.
 
 Representative create assertion:
 
 ```python
 with self.captureOnCommitCallbacks(execute=True):
-    response = self.client.post(self.add_url, post_data)
+    response = self.client.post(
+        self.add_url,
+        post_data,
+        headers={"Accept": "application/json"},
+    )
 self.assertEqual(response.status_code, 200)
 self.assertEqual(SimplePage.objects.filter(slug="mentioned-page").count(), 1)
 self.assertEqual(
@@ -1496,14 +1506,15 @@ Run:
 ```bash
 python runtests.py -- \
   wagtail.admin.tests.pages.test_edit_page.TestCommenting \
-  wagtail.admin.tests.pages.test_create_page.TestCommenting
+  wagtail.admin.tests.pages.test_create_page.TestCommenting \
+  wagtail.admin.tests.test_workflows.TestCommentMentionWorkflows
 ```
 
-Expected: FAIL because create does not collect/audit/notify mentions, reply parity is absent, and old notification timing is outside the page transaction.
+Expected: FAIL because lookup synchronization and the Task 7 scheduler are not integrated, create does not collect/audit/notify mentions, provisional permission loss is not reconstructed safely, and the nine action cores do not yet share one atomic comment lifecycle.
 
 - [ ] **Step 3: Integrate edit actions with atomic lookup synchronization**
 
-Replace view-local notification/deduplication code with:
+Add one small per-view integration helper and replace the Task 6 ordinary notification bridge/imports with these lifecycle operations:
 
 ```python
 comments_formset.sync_mention_lookups()
@@ -1520,7 +1531,11 @@ schedule_comment_notifications(
 )
 ```
 
-Call lookup synchronization after the normal formset save has assigned all message primary keys. Place synchronization, collection, audit, and scheduling inside the same existing or newly added `transaction.atomic()` block as page/comment/reply/revision persistence for save, publish, submit, restart-workflow, workflow-action, and cancel-workflow paths. The callback executes after the outermost commit.
+In every successful edit/create action, begin with lookup synchronization and change collection only after `save_revision()`, the reliable point at which staged comment and reply primary keys exist. Extend edit `save_action`'s existing block and add one outer `transaction.atomic()` around each of the other five edit and three create cores. Keep page/comment/reply/revision persistence, lookup sync, audit rows, subscription/privacy rows, and publish/workflow database actions inside that action block. For submit, restart, and perform-workflow actions, preserve the existing audit-before-workflow order. For cancel, preserve the existing cancel-first order and perform comment audit afterward. Run `schedule_comment_notifications()` as the final operation inside every block, after the successful publish/workflow action. Its callback then survives only a successful outer commit, and a scheduler failure rolls back the entire action. Remove `send_commenting_notifications()` completely to prevent duplicate or immediate ordinary mail.
+
+Keep after-hooks, response rendering, and messages outside the action block where existing behavior permits. `before_publish_page` must remain at its existing semantic point inside the publish transaction: after revision persistence and lookup synchronization, but before publishing. Collect the changes before the hook, then log and schedule them only after publishing. A hook response therefore still commits the draft revision and synchronized lookup rows while suppressing publish, comment audit, and comment notifications, matching the current edit behavior. Do not claim that the database transaction can undo arbitrary external side effects from hooks or signals.
+
+`EditView.form_invalid()` currently cancels a workflow even when the form is invalid. Preserve that existing behavior for unrelated invalid page fields, wrapped in `transaction.atomic()`, but detect exact comment/reply `mentions` field errors and leave the workflow untouched for those errors.
 
 - [ ] **Step 4: Recheck create targets on the provisional real page inside one transaction**
 
@@ -1531,7 +1546,11 @@ def revalidate_new_mentions_for_page(self, page):
     self.validate_new_mentions(page_mention_candidates(page))
 ```
 
-For save/publish/submit create actions, use one `transaction.atomic()` around: provisional `add_child`, actual-page recheck, comment/reply JSON save, inverse-index synchronization, revision, subscription, audit, notification scheduling, and publish/workflow start. `validate_new_mentions()` already maps invalid occurrence indices to the exact comment/reply fields and preserves bound redisplay; let its re-raised `InvalidMentionTargets` roll back all database effects. Before escaping the failed transaction, capture each invalid form prefix, its submitted occurrence list, and the generic field error. Reconstruct the unsaved page and bound form so its PK/path/depth/state do not describe the rolled-back tree node, then reapply that captured state to the matching comment/reply forms before serialization and HTML rerender. An equivalent reconstruction path is acceptable only if it preserves the exact field error and occurrence list. The permission-loss regression must assert the exact comment/reply error, retained hidden JSON, serialized occurrence, and absence of every rolled-back database effect.
+For each create core, use this fixed in-transaction order: `form.save(commit=False)`; for ordinary save and submit set `page.live = False`; provisionally call `parent_page.add_child(instance=page)`; immediately run actual-page `revalidate_new_mentions_for_page(page)`; then persist privacy, revision, subscription, lookup synchronization, and change collection. For ordinary save, log then schedule. For submit, log, start the workflow, then schedule. For publish, retain the submitted live state, run `before_publish_page`, publish only when it permits, then log and schedule. Scheduling is always last. No provisional write may occur outside the rollbackable outer transaction.
+
+`validate_new_mentions()` maps invalid indices to exact fields and re-raises. After rollback, capture `{form.prefix: invalid_target_mentions}` plus the one generic error from the failed form, refresh `parent_page` so treebeard's in-memory `numchild` is restored, and build a brand-new page with the original owner/locale, a brand-new `PageSubscription`, and a brand-new bound form. Reapply the normal required-field deferral, validate it, and call `restore_required_fields()` before rendering. Map fresh comment/reply forms by prefix through `iter_mention_forms`, then restore each submitted occurrence list and exact generic `mentions` error before `form_invalid()` renders. Assert the rebuilt page has `pk is None`, `_state.adding is True`, `path == ""`, and `depth == 0`; each rebuilt comment/reply has `pk is None` and `_state.adding is True`.
+
+The permission-loss HTML regressions must cover top-level comment and reply attribution and assert the exact field error, retained hidden JSON and `comments-data` occurrence, restored parent `numchild`, fresh unsaved instances, and absence of every provisional database row/callback. Current JSON `form_invalid()` returns only `success/error_code/error_message`; Task 8 tests successful JSON save/overwrite separately and leaves per-message JSON error serialization to Task 10.
 
 - [ ] **Step 5: Verify all edit/create paths and UUID users**
 
@@ -1541,19 +1560,21 @@ Run:
 python runtests.py -- \
   wagtail.admin.tests.pages.test_edit_page.TestCommenting \
   wagtail.admin.tests.pages.test_create_page.TestCommenting \
+  wagtail.admin.tests.test_workflows.TestCommentMentionWorkflows \
   wagtail.admin.tests.test_comment_notifications
 
 USE_EMAIL_USER_MODEL=yes python runtests.py -- \
   wagtail.admin.tests.pages.test_edit_page.TestCommenting \
-  wagtail.admin.tests.pages.test_create_page.TestCommenting
+  wagtail.admin.tests.pages.test_create_page.TestCommenting \
+  wagtail.admin.tests.test_workflows.TestCommentMentionWorkflows
 ```
 
-Expected: all PASS; exact-message lookup rows match occurrence target sets; no partial page/comment/reply/lookup/log/mail rows remain in invalid cases; UUID payloads serialize cleanly.
+Expected: all PASS; every action uses its declared post-revision ordering; exact-message lookup rows match occurrence target sets; no partial page/revision/comment/reply/lookup/log/subscription/privacy/workflow rows or mail callbacks remain in invalid/raised cases; UUID payloads serialize cleanly.
 
 - [ ] **Step 6: Commit lifecycle integration**
 
 ```bash
-git add wagtail/admin/views/pages/edit.py wagtail/admin/views/pages/create.py wagtail/admin/forms/comments.py wagtail/admin/tests/pages/test_edit_page.py wagtail/admin/tests/pages/test_create_page.py
+git add wagtail/admin/views/pages/edit.py wagtail/admin/views/pages/create.py wagtail/admin/forms/comments.py wagtail/admin/tests/pages/test_edit_page.py wagtail/admin/tests/pages/test_create_page.py wagtail/admin/tests/test_workflows.py
 git commit -m "Persist mentions across page comment lifecycles"
 ```
 
