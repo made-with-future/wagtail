@@ -163,9 +163,8 @@ export default function MentionEditor({
 
     editable.id = id;
     editable.setAttribute('data-focus-target', String(focusTarget));
-    editable.setAttribute('role', 'combobox');
     editable.setAttribute('aria-autocomplete', 'list');
-    editable.setAttribute('aria-expanded', String(listboxOpen));
+    editable.setAttribute('aria-haspopup', 'listbox');
 
     if (listboxOpen) {
       editable.setAttribute('aria-controls', listboxId);
@@ -182,9 +181,8 @@ export default function MentionEditor({
     return () => {
       editable.removeAttribute('id');
       editable.removeAttribute('data-focus-target');
-      editable.removeAttribute('role');
       editable.removeAttribute('aria-autocomplete');
-      editable.removeAttribute('aria-expanded');
+      editable.removeAttribute('aria-haspopup');
       editable.removeAttribute('aria-controls');
       editable.removeAttribute('aria-activedescendant');
     };

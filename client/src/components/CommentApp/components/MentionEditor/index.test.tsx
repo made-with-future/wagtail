@@ -108,9 +108,11 @@ test('renders one accessible multiline contenteditable and explicitly disables r
   const editable = editableElement(wrapper);
   expect(editable.id).toBe('comment-mention-editor-1');
   expect(editable.getAttribute('data-focus-target')).toBe('true');
-  expect(editable.getAttribute('role')).toBe('combobox');
+  expect(editable.getAttribute('aria-multiline')).toBe('true');
+  expect(editable.getAttribute('role')).toBe('textbox');
   expect(editable.getAttribute('aria-autocomplete')).toBe('list');
-  expect(editable.getAttribute('aria-expanded')).toBe('false');
+  expect(editable.getAttribute('aria-haspopup')).toBe('listbox');
+  expect(editable.hasAttribute('aria-expanded')).toBe(false);
   expect(editable.hasAttribute('aria-controls')).toBe(false);
   expect(editable.hasAttribute('aria-activedescendant')).toBe(false);
   expect(draftail(wrapper).props()).toMatchObject({
@@ -134,6 +136,9 @@ test('renders one accessible multiline contenteditable and explicitly disables r
   expect(
     mount(React.createElement(entityTypes[0].source)).isEmptyRender(),
   ).toBe(true);
+
+  wrapper.unmount();
+  expect(editable.hasAttribute('aria-haspopup')).toBe(false);
 });
 
 test('keeps selection and focus transitions local without parent callbacks', () => {
@@ -231,7 +236,7 @@ test('bridges popup ownership and active option only while a ready list exists',
   );
 
   expect(wrapper.find('[role="listbox"]')).toHaveLength(1);
-  expect(editableElement(wrapper).getAttribute('aria-expanded')).toBe('true');
+  expect(editableElement(wrapper).hasAttribute('aria-expanded')).toBe(false);
   expect(editableElement(wrapper).getAttribute('aria-controls')).toBe(
     'comment-mention-editor-1-suggestions',
   );
@@ -242,7 +247,7 @@ test('bridges popup ownership and active option only while a ready list exists',
   useSuggestionsMock.mockReturnValue(suggestionState());
   wrapper.setProps({ mentionedUsers: {} });
   wrapper.update();
-  expect(editableElement(wrapper).getAttribute('aria-expanded')).toBe('false');
+  expect(editableElement(wrapper).hasAttribute('aria-expanded')).toBe(false);
   expect(editableElement(wrapper).hasAttribute('aria-controls')).toBe(false);
   expect(editableElement(wrapper).hasAttribute('aria-activedescendant')).toBe(
     false,
@@ -405,7 +410,7 @@ test('composition defers query recomputation until the subsequent Draft change',
 });
 
 test.each(['loading', 'empty', 'error'] as const)(
-  'localizes the %s suggestion status without changing combobox state',
+  'localizes the %s suggestion status without changing popup state',
   (status) => {
     const messages = {
       loading: 'Loading mention suggestions...',
@@ -422,9 +427,7 @@ test.each(['loading', 'empty', 'error'] as const)(
     );
     expect(gettext).toHaveBeenCalledWith(messages[status]);
     expect(wrapper.find('[role="listbox"]')).toHaveLength(0);
-    expect(editableElement(wrapper).getAttribute('aria-expanded')).toBe(
-      'false',
-    );
+    expect(editableElement(wrapper).hasAttribute('aria-expanded')).toBe(false);
   },
 );
 
