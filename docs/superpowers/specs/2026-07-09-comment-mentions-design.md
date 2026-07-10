@@ -1,10 +1,12 @@
-# Comment mentions with Wagtail 7.4 compatibility
+# Comment mentions for Wagtail 7.4 and Wagtail 8.0 prerelease
 
-Status: approved design, including the Wagtail 8 primary-branch and Wagtail 7.4 compatibility strategy
+Status: approved design, including required Wagtail 7.4 and Wagtail 8.0 beta-or-later prerelease support
 
 Primary development base: the current pull-request branch on Wagtail 8.0 alpha
 
 Compatibility floor: Wagtail `stable/7.4.x`, including Django 5.2 and 6.0 and Wagtail's supported custom user models
+
+Required 8.0 target: an official Wagtail 8.0 beta-or-later prerelease (`beta` or `rc`), or Wagtail 8.0 final if it is released before verification completes. Alpha/main verification is useful during development but does not satisfy this release gate.
 
 ## Context
 
@@ -24,7 +26,7 @@ The current pull request proves the basic interaction on Wagtail 8.0 alpha code,
 - The suggestion endpoint does unbounded filtering with per-result permission checks, has avoidable query growth, and remains reachable when comments are disabled.
 - Replies cannot contain mentions, mention-only edits are missing from audit data, and edited comments can be presented as "new comments" in email.
 
-The implementation will be rebuilt on the current pull-request branch. Feature logic and data contracts will remain independent of Wagtail 8-only routing APIs, and a real backport worktree will prove that the result works on `stable/7.4.x` with only the expected route-registration, migration-dependency, and test-location adaptations.
+The implementation will be rebuilt on the current pull-request branch. Feature logic and data contracts will remain independent of Wagtail 8-only routing APIs, a real backport worktree will prove that the result works on `stable/7.4.x` with only the expected route-registration, migration-dependency, and test-location adaptations, and final verification will run after the primary branch is based on an official Wagtail 8.0 beta-or-later prerelease.
 
 ## Goals
 
@@ -39,6 +41,7 @@ The implementation will be rebuilt on the current pull-request branch. Feature l
 - Keep mention persistence atomic with the comment or reply save and make notification behavior deterministic.
 - Work with integer, UUID, and converted custom user primary keys supported by Wagtail's test configurations.
 - Bound suggestion and submitted-mention work to predictable limits.
+- Support both Wagtail 7.4 and Wagtail 8.0 beta-or-later with the complete backend, frontend, migration, browser, and accessibility matrix.
 
 ## Non-goals
 
@@ -224,13 +227,13 @@ Audit data for comment and reply creation or edit includes added and removed men
 
 ## Compatibility and branch strategy
 
-PR 1 remains based on its current Wagtail 8-era `main` branch. Existing mention code may be replaced freely, but unrelated upstream code and commits remain untouched. Core range handling, validation, candidate selection, form semantics, serialization, notifications, and frontend state live in modules and interfaces shared with Wagtail 7.4; they must not depend on Wagtail 8-only page-viewset behavior.
+PR 1 remains based on the Wagtail 8.0 `main` branch. Existing mention code may be replaced freely, but unrelated upstream code and commits remain untouched. The current checkout reports 8.0 alpha, so its results are provisional until official `main` reaches a beta-or-later prerelease and the branch is refreshed against that exact commit. Core range handling, validation, candidate selection, form semantics, serialization, notifications, and frontend state live in modules and interfaces shared with Wagtail 7.4; they must not depend on Wagtail 8-only page-viewset behavior.
 
 Routing is the deliberate compatibility seam. The primary branch registers the shared suggestion views through Wagtail 8's `PageViewSet` structure. The 7.4 backport registers those same views through the direct page edit/create URL configuration used by `stable/7.4.x`. Any other source difference discovered during the backport is treated as a compatibility defect unless it is limited to migration dependency numbering or test-file placement.
 
-Before implementation and again before final verification, the official branches are refreshed with `git fetch --no-tags https://github.com/wagtail/wagtail.git +refs/heads/main:refs/remotes/upstream/main +refs/heads/stable/7.4.x:refs/remotes/upstream/stable/7.4.x`, and both fetched commit IDs are recorded. Compatibility is then proved continuously on a committed local `compat/comment-mentions-7.4` branch in a separate worktree based on that exact 7.4 commit. The current feature diff relative to PR 1's recorded base is exported and applied after each coherent backend/frontend slice; it is not inferred from the stale pre-redesign commits.
+Before implementation and again before final verification, the official branches are refreshed with `git fetch --no-tags https://github.com/wagtail/wagtail.git +refs/heads/main:refs/remotes/upstream/main +refs/heads/stable/7.4.x:refs/remotes/upstream/stable/7.4.x`, and both fetched commit IDs plus the primary Wagtail version tuple are recorded. Compatibility is then proved continuously on a committed local `compat/comment-mentions-7.4` branch in a separate worktree based on that exact 7.4 commit. The current feature diff relative to PR 1's recorded base is exported and applied after each coherent backend/frontend slice; it is not inferred from the stale pre-redesign commits. Final completion additionally requires the primary version tuple to be `(8, 0, 0, "beta", N)`, `(8, 0, 0, "rc", N)`, or the 8.0 final tuple; if official `main` is still alpha, implementation may continue but publication and the cross-version compatibility claim remain pending.
 
-The compatibility branch is retained through final handoff. A committed report at `docs/superpowers/compatibility/2026-07-09-comment-mentions-7.4.md` records the primary base/head, official 7.4 base/head, runtime-feature patch checksum, commit mapping, `git range-diff` output or an explicit explanation where a one-to-one commit mapping is impossible, file-level name/status and stat comparisons, every adaptation, and all verification commands and results. The runtime patch and equivalence comparison exclude primary-only design/plan/compatibility reports, pull-request administration, changelog, contributor, and release-note files. The report and local branch are the compatibility deliverable; a clean compile or theoretical API comparison is not sufficient. The report must show that runtime and test adaptations are limited to the declared routing, migration-dependency, or test-location seams, or identify a design defect that must be corrected on the primary branch.
+The compatibility branch is retained through final handoff. A committed report at `docs/superpowers/compatibility/2026-07-09-comment-mentions-7.4.md` records the exact tested Wagtail 8.0 beta-or-later and 7.4 versions, primary base/head, official 7.4 base/head, runtime-feature patch checksum, commit mapping, `git range-diff` output or an explicit explanation where a one-to-one commit mapping is impossible, file-level name/status and stat comparisons, every adaptation, and all verification commands and results. The runtime patch and equivalence comparison exclude primary-only design/plan/compatibility reports, pull-request administration, changelog, contributor, and release-note files. The report and local branch are the compatibility deliverable; a clean compile or theoretical API comparison is not sufficient. The report must show that runtime and test adaptations are limited to the declared routing, migration-dependency, or test-location seams, or identify a design defect that must be corrected on the primary branch.
 
 Mini Draftail uses the Draftail and Draft.js dependencies already shipped by both target branches; this feature adds no editor dependency and does not store raw Draft.js content. Both branches must preserve their supported Python, Django, database, browser, and custom-user configurations rather than depending on PostgreSQL-only JSON operations, integer primary keys, or APIs introduced after 7.4.
 
@@ -289,7 +292,7 @@ Implementation is test-driven and covers the contract at five layers.
 
 ### Cross-version verification matrix
 
-The primary Wagtail 8-era branch and committed 7.4 compatibility branch each run:
+The primary Wagtail 8.0 beta-or-later branch and committed 7.4 compatibility branch each run:
 
 - the complete focused comment, reply, create/edit page, suggestion, notification, audit, permission, migration, serialization, and custom-user backend suites;
 - the surrounding existing page create/edit and comment regression suites;
@@ -297,13 +300,13 @@ The primary Wagtail 8-era branch and committed 7.4 compatibility branch each run
 - migration consistency checks; and
 - the Chromium mention Playwright scenario with Axe checks, including both edit-page and create-page suggestion routing.
 
-The 7.4 branch additionally runs its Django 5.2 and Django 6.0 test environments and UUID email-user configuration. The primary branch runs its repository-declared Django/default-user matrix plus the UUID email-user configuration. The required manual Firefox scenario runs against the primary branch; the automated 7.4 Chromium run covers the version-specific browser routing seam.
+The 7.4 branch additionally runs its Django 5.2 and Django 6.0 test environments and UUID email-user configuration. The 8.0 branch runs its repository-declared Django/default-user matrix plus the UUID email-user configuration. The required manual Firefox scenario runs against the beta-or-later 8.0 branch; the automated 7.4 Chromium run covers the version-specific browser routing seam. Any matrix run while `VERSION` still reports 8.0 alpha is recorded as provisional and must be repeated after the beta-or-later gate is available.
 
 ## Acceptance criteria
 
 The implementation is ready when:
 
-1. The complete cross-version matrix above passes on the primary Wagtail 8-era branch and committed compatibility branch based on a freshly fetched and recorded official `stable/7.4.x` commit.
+1. The complete cross-version matrix above passes on both a primary branch based on a freshly fetched official Wagtail 8.0 beta-or-later commit and the committed compatibility branch based on a freshly fetched official `stable/7.4.x` commit; both exact OIDs and version strings are recorded.
 2. Existing page create/edit, comment, reply, notification, audit, and permission suites pass unchanged or with intentional assertions added on both branches.
 3. Django 5.2 and Django 6.0 pass on 7.4, and each branch's UUID email-user configuration passes.
 4. Frontend type checking, linting, formatting, style linting, production build, Chromium mention regression, and Axe checks pass on both branches; the required primary-branch Firefox manual scenario and version are recorded.

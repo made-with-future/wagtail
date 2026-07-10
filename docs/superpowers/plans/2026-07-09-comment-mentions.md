@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace PR 1's unsafe email-token prototype with structured, accessible `@` mentions for page comments and replies, developed on the current Wagtail 8-era branch and proven on Wagtail 7.4.
+**Goal:** Replace PR 1's unsafe email-token prototype with structured, accessible `@` mentions for page comments and replies, with the complete feature proven on both Wagtail 7.4 and an official Wagtail 8.0 beta-or-later prerelease.
 
 **Architecture:** Keep comment and reply text as plain strings, store validated occurrence ranges as JSON, and maintain unique relational lookup rows per exact message/user for efficient inverse queries. Use toolbar-free Mini Draftail `MENTION` entities to track and highlight occurrences during editing, hydrate current email as separate metadata, and keep validation, audit, notification, and permission logic independent of Wagtail 8-only routing.
 
@@ -10,7 +10,8 @@
 
 ## Global Constraints
 
-- Primary development stays on PR 1's current Wagtail 8-era branch; official `main` and `stable/7.4.x` refs must be freshly fetched and recorded before code work and final verification.
+- Primary development stays on PR 1's Wagtail 8.0 `main` branch; official `main` and `stable/7.4.x` refs plus the primary version string must be freshly fetched and recorded before code work and final verification.
+- Wagtail 8.0 alpha results are provisional. Final compatibility requires the complete matrix on Wagtail 8.0 `beta`, `rc`, or final as well as on `stable/7.4.x`; do not claim or publish cross-version completion while the primary version still reports alpha.
 - Comments and replies share the exact occurrence contract: `{key, user_id, start, end, label}` with half-open UTF-16 offsets.
 - Each message allows at most 20 occurrences, a 16 KiB UTF-8 JSON payload, and 255 UTF-16 units per server-generated label.
 - For this release, labels use the current configured email value, fall back to Wagtail display name and then `user.get_username()`, normalize whitespace, and truncate on a code-point boundary with an ellipsis when needed.
@@ -75,7 +76,7 @@
 
 **Interfaces:**
 - Consumes: current clean `worktree/comment-mentions` branch.
-- Produces: `/tmp/comment-mentions-bases.env` containing `PRIMARY_WORKTREE`, `OFFICIAL_MAIN`, `OFFICIAL_STABLE`, `PRIMARY_BASE`, and `REDESIGN_BASE`, plus a verified baseline from which later compatibility patches and before/after UI evidence are generated.
+- Produces: `/tmp/comment-mentions-bases.env` containing `PRIMARY_WORKTREE`, `OFFICIAL_MAIN`, `OFFICIAL_STABLE`, `PRIMARY_BASE`, `REDESIGN_BASE`, and `PRIMARY_VERSION`, plus a verified baseline from which later compatibility patches and before/after UI evidence are generated.
 
 - [ ] **Step 1: Verify the primary checkout is clean and identify the obsolete source commits**
 
@@ -105,7 +106,8 @@ OFFICIAL_STABLE=$(git rev-parse refs/remotes/upstream/stable/7.4.x)
 PRIMARY_BASE=$(git merge-base "$OFFICIAL_MAIN" HEAD)
 PRIMARY_WORKTREE=$(git rev-parse --show-toplevel)
 REDESIGN_BASE=$(git rev-parse HEAD)
-printf '%s\n' "$OFFICIAL_MAIN" "$OFFICIAL_STABLE" "$PRIMARY_BASE" "$PRIMARY_WORKTREE" "$REDESIGN_BASE"
+PRIMARY_VERSION=$(python -c 'import wagtail; print(wagtail.__version__)')
+printf '%s\n' "$OFFICIAL_MAIN" "$OFFICIAL_STABLE" "$PRIMARY_BASE" "$PRIMARY_WORKTREE" "$REDESIGN_BASE" "$PRIMARY_VERSION"
 
 {
   printf 'PRIMARY_WORKTREE=%s\n' "$PRIMARY_WORKTREE"
@@ -113,10 +115,11 @@ printf '%s\n' "$OFFICIAL_MAIN" "$OFFICIAL_STABLE" "$PRIMARY_BASE" "$PRIMARY_WORK
   printf 'OFFICIAL_STABLE=%s\n' "$OFFICIAL_STABLE"
   printf 'PRIMARY_BASE=%s\n' "$PRIMARY_BASE"
   printf 'REDESIGN_BASE=%s\n' "$REDESIGN_BASE"
+  printf 'PRIMARY_VERSION=%s\n' "$PRIMARY_VERSION"
 } > /tmp/comment-mentions-bases.env
 ```
 
-Expected: the fetched and `ls-remote` OIDs match for both branches.
+Expected: the fetched and `ls-remote` OIDs match for both branches. Record the current `8.0aN`, `8.0bN`, `8.0rcN`, or `8.0` string exactly; an alpha value permits implementation but remains provisional until Task 16.
 
 - [ ] **Step 3: Enforce the main-base gate**
 
@@ -126,6 +129,7 @@ Run:
 source /tmp/comment-mentions-bases.env
 test "$PRIMARY_BASE" = "$OFFICIAL_MAIN"
 test "$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)" = "$(git rev-parse HEAD)"
+python -c 'from wagtail import VERSION; assert VERSION[:3] == (8, 0, 0)'
 ```
 
 Expected: exit 0. If it fails, stop implementation and obtain approval to rebuild/rebase the PR on official main; do not layer new code over an outdated base or blindly rebase the obsolete prototype series.
@@ -2016,7 +2020,7 @@ git commit -m "Test comment mentions in the browser"
 
 ---
 
-### Task 14: Primary-Branch Verification and Reviewer Artifact
+### Task 14: Primary Wagtail 8.0 Verification and Reviewer Artifact
 
 **Files:**
 - Modify only if verification finds defects: files owned by Tasks 2-13.
@@ -2025,11 +2029,12 @@ git commit -m "Test comment mentions in the browser"
 
 **Interfaces:**
 - Consumes: complete primary implementation.
-- Produces: green primary matrix and a PR body drafted from the final diff.
+- Produces: green primary Wagtail 8.0 matrix and a PR body drafted from the final diff; results remain provisional if `VERSION` still reports alpha.
 
 - [ ] **Step 1: Run the complete focused backend matrix**
 
 ```bash
+python -c 'import wagtail; print(wagtail.__version__)'
 BACKEND_TESTS=(
   wagtail.tests.test_comments
   wagtail.admin.tests.test_comment_mentions
@@ -2050,7 +2055,7 @@ uvx --from 'tox>=4,<5' tox \
   -e py313-dj60-sqlite-noelasticsearch-emailuser-tz -- "${BACKEND_TESTS[@]}"
 ```
 
-Expected: all commands PASS.
+Expected: all commands PASS and the exact Wagtail 8.0 version is recorded. An alpha run is valid development evidence but does not discharge Task 16's beta-or-later gate.
 
 - [ ] **Step 2: Run complete frontend/build/static verification**
 
@@ -2093,7 +2098,7 @@ Expected: only mention-related code/tests/design/plan files; no generated build 
 
 - [ ] **Step 5: Draft the PR description from the final diff**
 
-Use `.github/PULL_REQUEST_TEMPLATE.md` and keep the existing PR rather than opening a replacement. Give it a descriptive feature title, preserve the linked issue, and include a one-sentence solution summary, assumptions, before/after screenshots, and explicit Chromium/Axe/Firefox results as required by Wagtail's first-contribution guide. Explain why plain model text, Mini Draftail entities, occurrence JSON, exact-message inverse indexes, live-email metadata separation, and recipient merging are the right solution. Call out UTF-16 validation, lookup synchronization, create-page recheck, DB-backed candidate filtering, notification overlap, and 7.4 evidence for careful review. Include suggested `CHANGELOG.txt`, `docs/releases/8.0.md`, and contributor wording for a core committer, but do not edit those files.
+Use `.github/PULL_REQUEST_TEMPLATE.md` and keep the existing PR rather than opening a replacement. Give it a descriptive feature title, preserve the linked issue, and include a one-sentence solution summary, assumptions, before/after screenshots, and explicit Chromium/Axe/Firefox results as required by Wagtail's first-contribution guide. Explain why plain model text, Mini Draftail entities, occurrence JSON, exact-message inverse indexes, live-email metadata separation, and recipient merging are the right solution. Call out UTF-16 validation, lookup synchronization, create-page recheck, DB-backed candidate filtering, notification overlap, and both 7.4 and 8.0 beta-or-later evidence for careful review. Include the exact tested Wagtail version/OID for each release line; label any alpha result provisional. Include suggested `CHANGELOG.txt`, `docs/releases/8.0.md`, and contributor wording for a core committer, but do not edit those files.
 
 End with:
 
@@ -2130,6 +2135,7 @@ git -C "$PRIMARY_WORKTREE" fetch --no-tags https://github.com/wagtail/wagtail.gi
 OFFICIAL_MAIN=$(git -C "$PRIMARY_WORKTREE" rev-parse refs/remotes/upstream/main)
 OFFICIAL_STABLE=$(git -C "$PRIMARY_WORKTREE" rev-parse refs/remotes/upstream/stable/7.4.x)
 PRIMARY_BASE=$(git -C "$PRIMARY_WORKTREE" merge-base "$OFFICIAL_MAIN" HEAD)
+PRIMARY_VERSION=$(python -c 'import wagtail; print(wagtail.__version__)')
 test "$PRIMARY_BASE" = "$OFFICIAL_MAIN"
 
 {
@@ -2138,6 +2144,7 @@ test "$PRIMARY_BASE" = "$OFFICIAL_MAIN"
   printf 'OFFICIAL_STABLE=%s\n' "$OFFICIAL_STABLE"
   printf 'PRIMARY_BASE=%s\n' "$PRIMARY_BASE"
   printf 'REDESIGN_BASE=%s\n' "$REDESIGN_BASE"
+  printf 'PRIMARY_VERSION=%s\n' "$PRIMARY_VERSION"
 } > /tmp/comment-mentions-bases.env
 
 if test -e "$COMPAT"; then
@@ -2308,6 +2315,7 @@ The report contains these completed headings with literal values/output summarie
 # Comment mentions: Wagtail 7.4 compatibility
 
 ## Recorded revisions
+## Tested Wagtail versions
 ## Runtime patch SHA-256
 ## Commit and file comparison
 ## Intentional adaptations
@@ -2327,6 +2335,57 @@ git -C "$PRIMARY_WORKTREE" add docs/superpowers/compatibility/2026-07-09-comment
 git -C "$PRIMARY_WORKTREE" commit -m "Document Wagtail 7.4 mention compatibility"
 ```
 
-- [ ] **Step 7: Final completion audit before publication**
+- [ ] **Step 7: Audit the completed 7.4 proof**
 
-Source both `/tmp/comment-mentions-bases.env` and `/tmp/comment-mentions-compat.env`, then re-run `git status`, primary/compat OIDs, full required matrix evidence, changed-file/history lists, and the seven acceptance criteria in the design spec one by one. Confirm the compatibility branch remains local and retained. Only after user authorization: push the primary branch, rewrite PR 1 from the final diff/template, verify remote head/body/checks, and leave the PR draft until human review occurs.
+Source both `/tmp/comment-mentions-bases.env` and `/tmp/comment-mentions-compat.env`, then re-run `git status`, primary/compat OIDs, full required matrix evidence, and changed-file/history lists. Confirm the compatibility branch remains local and retained, and record whether `PRIMARY_VERSION` is provisional alpha or beta-or-later. Do not publish yet; Task 16 is the final two-release gate.
+
+---
+
+### Task 16: Wagtail 8.0 Beta-or-Later Release Gate
+
+**Files:**
+- Modify if OIDs or results changed: `docs/superpowers/compatibility/2026-07-09-comment-mentions-7.4.md`.
+- Modify only after user authorization: the existing PR 1 title/body on GitHub.
+
+**Interfaces:**
+- Consumes: the complete primary implementation, retained 7.4 proof, freshly fetched official `main`, and Wagtail's actual `VERSION` tuple.
+- Produces: final evidence that the feature works on both Wagtail 7.4 and Wagtail 8.0 beta-or-later; alpha-only evidence cannot satisfy this task.
+
+- [ ] **Step 1: Refresh official main and enforce the 8.0 release-stage gate**
+
+Run with network approval:
+
+```bash
+source /tmp/comment-mentions-bases.env
+git -C "$PRIMARY_WORKTREE" fetch --no-tags https://github.com/wagtail/wagtail.git \
+  +refs/heads/main:refs/remotes/upstream/main
+
+OFFICIAL_MAIN=$(git -C "$PRIMARY_WORKTREE" rev-parse refs/remotes/upstream/main)
+PRIMARY_BASE=$(git -C "$PRIMARY_WORKTREE" merge-base "$OFFICIAL_MAIN" HEAD)
+PRIMARY_VERSION=$(python -c 'import wagtail; print(wagtail.__version__)')
+printf '%s\n' "$OFFICIAL_MAIN" "$PRIMARY_BASE" "$PRIMARY_VERSION"
+
+test "$PRIMARY_BASE" = "$OFFICIAL_MAIN"
+python -c 'from wagtail import VERSION; assert VERSION[:3] == (8, 0, 0); assert VERSION[3] in {"beta", "rc", "final"}'
+
+{
+  printf 'PRIMARY_WORKTREE=%s\n' "$PRIMARY_WORKTREE"
+  printf 'OFFICIAL_MAIN=%s\n' "$OFFICIAL_MAIN"
+  printf 'OFFICIAL_STABLE=%s\n' "$OFFICIAL_STABLE"
+  printf 'PRIMARY_BASE=%s\n' "$PRIMARY_BASE"
+  printf 'REDESIGN_BASE=%s\n' "$REDESIGN_BASE"
+  printf 'PRIMARY_VERSION=%s\n' "$PRIMARY_VERSION"
+} > /tmp/comment-mentions-bases.env
+```
+
+Expected: the primary branch is based on the freshly fetched official `main`, and its version is 8.0 beta, release candidate, or final. If official `main` or the feature branch still reports alpha, record the gate as pending and stop only completion/publication; implementation work and provisional tests may continue. If `main` advanced, obtain user approval before rebuilding/rebasing the existing PR branch, then continue with the refreshed branch rather than opening a replacement PR.
+
+- [ ] **Step 2: Repeat both release-line proofs after the 8.0 refresh**
+
+Rerun every Task 14 backend, frontend, migration, Chromium/Axe, Firefox, diff, and history command on the beta-or-later primary branch. Because a primary rebase changes source OIDs and the exported runtime patch, generate the fresh Task 15 patch/checksum and compare it with the retained 7.4 implementation. Do not apply the full patch over the existing backport. If feature behavior changed, hand-port only the incremental mention changes as a new compatibility commit; otherwise leave its code commit unchanged. Then rerun Task 15 Steps 4-7, refresh `PRIMARY_HEAD` / `COMPAT_HEAD`, update the report's versions, OIDs, checksum, comparisons, and results, and verify that the declared adaptation set remains unchanged.
+
+Expected: the full matrix passes on exact recorded Wagtail 8.0 beta-or-later and Wagtail 7.4 OIDs, not merely on an earlier alpha snapshot.
+
+- [ ] **Step 3: Final two-release completion and publication audit**
+
+Check the seven design-spec acceptance criteria one by one, including exact version strings/OIDs, both browser runs, migration equivalence, compatibility diff evidence, focused history, PR template, screenshots, and AI disclosure. Confirm both worktrees are clean and the 7.4 branch remains local. Only after separate user authorization: push the primary branch, update the existing PR 1 title/body from the verified evidence, verify its remote head/body/checks, and leave it draft until human review occurs.
