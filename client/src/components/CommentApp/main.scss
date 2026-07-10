@@ -2,6 +2,8 @@
 @use 'components/Comment/style' as Comment;
 @use 'components/CommentReply/style' as CommentReply;
 
+@import 'draft-js/dist/Draft.css';
+
 .comments-list {
   position: relative;
   top: 20px;

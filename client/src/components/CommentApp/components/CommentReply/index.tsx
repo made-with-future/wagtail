@@ -1,11 +1,13 @@
 import type { Store } from '../../state';
 import type { Author, Comment, CommentReply } from '../../state/comments';
+import type { MentionedUser } from '../../utils/mentions';
 import React from 'react';
 
 import { gettext } from '../../../../utils/gettext';
 import { deleteReply, updateReply } from '../../actions/comments';
 import { CommentHeader } from '../CommentHeader';
-import TextArea from '../TextArea';
+import MentionEditor from '../MentionEditor';
+import MentionText from '../MentionText';
 
 export async function saveCommentReply(
   comment: Comment,
@@ -23,6 +25,7 @@ export async function saveCommentReply(
       updateReply(comment.localId, reply.localId, {
         mode: 'default',
         text: reply.newText,
+        mentions: reply.newMentions,
         author: reply.author,
       }),
     );
@@ -65,16 +68,20 @@ export interface CommentReplyProps {
   store: Store;
   user: Author | null;
   isFocused: boolean;
+  mentionedUsers?: Readonly<Record<string, MentionedUser>>;
+  mentionSuggestionsUrl?: string;
 }
 
 export default class CommentReplyComponent extends React.Component<CommentReplyProps> {
   renderEditing(): React.ReactFragment {
     const { comment, reply, store, isFocused } = this.props;
+    const descriptionId = `comment-reply-description-${comment.localId}-${reply.localId}`;
 
-    const onChangeText = (value: string) => {
+    const onChange = (value: string, mentions: CommentReply['newMentions']) => {
       store.dispatch(
         updateReply(comment.localId, reply.localId, {
           newText: value,
+          newMentions: mentions,
         }),
       );
     };
@@ -87,22 +94,41 @@ export default class CommentReplyComponent extends React.Component<CommentReplyP
     const onCancel = (e: React.MouseEvent) => {
       e.preventDefault();
 
-      store.dispatch(
-        updateReply(comment.localId, reply.localId, {
-          mode: 'default',
-          newText: reply.text,
-        }),
-      );
+      if (reply.remoteId === null) {
+        store.dispatch(deleteReply(comment.localId, reply.localId));
+      } else {
+        store.dispatch(
+          updateReply(comment.localId, reply.localId, {
+            mode: 'default',
+            text: reply.originalText,
+            mentions: reply.originalMentions,
+            newText: reply.originalText,
+            newMentions: reply.originalMentions,
+          }),
+        );
+      }
     };
 
     return (
       <>
-        <CommentHeader commentReply={reply} store={store} focused={isFocused} />
+        <CommentHeader
+          commentReply={reply}
+          descriptionId={descriptionId}
+          store={store}
+          focused={isFocused}
+        />
         <form onSubmit={onSave}>
-          <TextArea
+          <MentionEditor
+            id={`comment-reply-mention-editor-${comment.localId}-${reply.localId}`}
+            label={gettext('Edit reply')}
             className="comment-reply__input"
             value={reply.newText}
-            onChange={onChangeText}
+            mentions={reply.newMentions}
+            mentionedUsers={this.props.mentionedUsers || {}}
+            mentionSuggestionsUrl={this.props.mentionSuggestionsUrl}
+            error={reply.mentionError}
+            describedBy={descriptionId}
+            onChange={onChange}
           />
           <div className="comment__actions">
             <button
@@ -131,7 +157,11 @@ export default class CommentReplyComponent extends React.Component<CommentReplyP
     return (
       <>
         <CommentHeader commentReply={reply} store={store} focused={isFocused} />
-        <p className="comment__text">{reply.text}</p>
+        <MentionText
+          text={reply.text}
+          mentions={reply.mentions}
+          mentionedUsers={this.props.mentionedUsers || {}}
+        />
         <div className="comment__progress">{gettext('Saving...')}</div>
       </>
     );
@@ -149,7 +179,11 @@ export default class CommentReplyComponent extends React.Component<CommentReplyP
     return (
       <>
         <CommentHeader commentReply={reply} store={store} focused={isFocused} />
-        <p className="comment__text">{reply.text}</p>
+        <MentionText
+          text={reply.text}
+          mentions={reply.mentions}
+          mentionedUsers={this.props.mentionedUsers || {}}
+        />
         <div className="comment__error">
           {gettext('Save error')}
           <button
@@ -186,7 +220,11 @@ export default class CommentReplyComponent extends React.Component<CommentReplyP
     return (
       <>
         <CommentHeader commentReply={reply} store={store} focused={isFocused} />
-        <p className="comment__text">{reply.text}</p>
+        <MentionText
+          text={reply.text}
+          mentions={reply.mentions}
+          mentionedUsers={this.props.mentionedUsers || {}}
+        />
         <div className="comment__confirm-delete">
           {gettext('Are you sure?')}
           <button
@@ -214,7 +252,11 @@ export default class CommentReplyComponent extends React.Component<CommentReplyP
     return (
       <>
         <CommentHeader commentReply={reply} store={store} focused={isFocused} />
-        <p className="comment__text">{reply.text}</p>
+        <MentionText
+          text={reply.text}
+          mentions={reply.mentions}
+          mentionedUsers={this.props.mentionedUsers || {}}
+        />
         <div className="comment__progress">{gettext('Deleting')}</div>
       </>
     );
@@ -242,7 +284,11 @@ export default class CommentReplyComponent extends React.Component<CommentReplyP
     return (
       <>
         <CommentHeader commentReply={reply} store={store} focused={isFocused} />
-        <p className="comment__text">{reply.text}</p>
+        <MentionText
+          text={reply.text}
+          mentions={reply.mentions}
+          mentionedUsers={this.props.mentionedUsers || {}}
+        />
         <div className="comment__error">
           {gettext('Delete error')}
           <button
@@ -279,6 +325,7 @@ export default class CommentReplyComponent extends React.Component<CommentReplyP
           updateReply(comment.localId, reply.localId, {
             mode: 'editing',
             newText: reply.text,
+            newMentions: reply.mentions,
           }),
         );
       };
@@ -301,7 +348,11 @@ export default class CommentReplyComponent extends React.Component<CommentReplyP
           onDelete={onDelete}
           focused={isFocused}
         />
-        <p className="comment__text">{reply.text}</p>
+        <MentionText
+          text={reply.text}
+          mentions={reply.mentions}
+          mentionedUsers={this.props.mentionedUsers || {}}
+        />
       </>
     );
   }

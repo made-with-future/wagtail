@@ -1,3 +1,4 @@
+import type { MentionOccurrence } from '../utils/mentions';
 import { basicCommentsState } from '../__fixtures__/state';
 import * as actions from '../actions/comments';
 import { reducer } from '../state';
@@ -84,10 +85,11 @@ test('Select is dirty', () => {
     actions.updateComment(1, {
       mentions: [
         {
-          id: 2,
-          name: 'Mentioned User',
-          email: 'mentioned@example.com',
-          url: '/admin/users/2/',
+          key: 'mention-1',
+          userId: '2',
+          start: 0,
+          end: 4,
+          label: '@Ada',
         },
       ],
     }),
@@ -134,4 +136,134 @@ test('Select is dirty', () => {
   );
 
   expect(selectIsDirty(stateWithEditedReply)).toBe(true);
+});
+
+const adaMention: MentionOccurrence = {
+  key: 'mention-ada',
+  userId: '7',
+  start: 6,
+  end: 10,
+  label: '@Ada',
+};
+
+const savedCommentState = (mentions: MentionOccurrence[] = [adaMention]) => {
+  const state = {
+    comments: INITIAL_COMMENTS_STATE,
+    settings: INITIAL_SETTINGS_STATE,
+  };
+  return reducer(
+    state,
+    actions.addComment(
+      newComment('path', '', 1, null, null, 0, {
+        remoteId: 1,
+        text: 'Hello @Ada',
+        mentions,
+      }),
+    ),
+  );
+};
+
+test.each([
+  ['key', { ...adaMention, key: 'different-key' }],
+  ['user', { ...adaMention, userId: '8' }],
+  ['start', { ...adaMention, start: 5 }],
+  ['end', { ...adaMention, end: 11 }],
+  ['label', { ...adaMention, label: '@Grace' }],
+])('mention %s changes make comment state dirty', (_field, changedMention) => {
+  const changed = reducer(
+    savedCommentState(),
+    actions.updateComment(1, { mentions: [changedMention] }),
+  );
+
+  expect(selectIsDirty(changed)).toBe(true);
+});
+
+test('mention additions, removals, moves, and exact reverts drive dirty state', () => {
+  const state = savedCommentState();
+  const graceMention: MentionOccurrence = {
+    key: 'mention-grace',
+    userId: '8',
+    start: 15,
+    end: 21,
+    label: '@Grace',
+  };
+
+  expect(
+    selectIsDirty(reducer(state, actions.updateComment(1, { mentions: [] }))),
+  ).toBe(true);
+  expect(
+    selectIsDirty(
+      reducer(
+        state,
+        actions.updateComment(1, {
+          mentions: [adaMention, graceMention],
+        }),
+      ),
+    ),
+  ).toBe(true);
+  expect(
+    selectIsDirty(
+      reducer(
+        state,
+        actions.updateComment(1, {
+          mentions: [{ ...adaMention, start: 12, end: 16 }],
+        }),
+      ),
+    ),
+  ).toBe(true);
+
+  const reverted = reducer(
+    reducer(state, actions.updateComment(1, { mentions: [graceMention] })),
+    actions.updateComment(1, { mentions: [{ ...adaMention }] }),
+  );
+  expect(selectIsDirty(reverted)).toBe(false);
+});
+
+test('reply occurrence changes make state dirty and exact reverts are clean', () => {
+  const base = savedCommentState([]);
+  const withReply = reducer(
+    base,
+    actions.addReply(
+      1,
+      newCommentReply(2, null, 0, {
+        remoteId: 2,
+        text: 'Hello @Ada',
+        mentions: [adaMention],
+      }),
+    ),
+  );
+  const changed = reducer(
+    withReply,
+    actions.updateReply(1, 2, {
+      mentions: [{ ...adaMention, key: 'changed' }],
+    }),
+  );
+  const reverted = reducer(
+    changed,
+    actions.updateReply(1, 2, { mentions: [{ ...adaMention }] }),
+  );
+
+  expect(selectIsDirty(changed)).toBe(true);
+  expect(selectIsDirty(reverted)).toBe(false);
+});
+
+test('message errors and mentioned-user metadata do not make content dirty', () => {
+  const state = savedCommentState();
+  const withError = reducer(
+    state,
+    actions.updateComment(1, {
+      mentionError: 'Enter a valid mention list.',
+    }),
+  );
+
+  expect(selectIsDirty(withError)).toBe(false);
+  expect(
+    selectIsDirty({
+      ...withError,
+      settings: {
+        ...withError.settings,
+        mentionedUsers: { '7': { email: 'new@example.com' } },
+      },
+    }),
+  ).toBe(false);
 });

@@ -1,3 +1,4 @@
+import type { MentionOccurrence } from '../utils/mentions';
 import { legacy_createStore as createStore } from 'redux';
 import { basicCommentsState } from '../__fixtures__/state';
 import * as actions from '../actions/comments';
@@ -6,8 +7,18 @@ import {
   CommentReply,
   CommentReplyUpdate,
   CommentUpdate,
+  newComment,
+  newCommentReply,
   reducer,
 } from './comments';
+
+const adaMention: MentionOccurrence = {
+  key: 'mention-ada',
+  userId: '7',
+  start: 6,
+  end: 10,
+  label: '@Ada',
+};
 
 test('Initial comments state empty', () => {
   const state = createStore(reducer).getState();
@@ -18,7 +29,7 @@ test('Initial comments state empty', () => {
 });
 
 test('New comment added to state', () => {
-  const newComment: Comment = {
+  const commentToAdd: Comment = {
     contentpath: 'test_contentpath',
     position: '',
     localId: 5,
@@ -34,21 +45,22 @@ test('New comment added to state', () => {
     originalMentions: [],
     newMentions: [],
     newReply: '',
+    newReplyMentions: [],
     newText: '',
     remoteReplyCount: 0,
     resolved: false,
     replies: new Map(),
   };
-  const commentAction = actions.addComment(newComment);
+  const commentAction = actions.addComment(commentToAdd);
   const newState = reducer(basicCommentsState, commentAction);
-  expect(newState.comments.get(newComment.localId)).toBe(newComment);
+  expect(newState.comments.get(commentToAdd.localId)).toBe(commentToAdd);
   expect(newState.remoteCommentCount).toBe(
     basicCommentsState.remoteCommentCount,
   );
 });
 
 test('Remote comment added to state', () => {
-  const newComment: Comment = {
+  const commentToAdd: Comment = {
     contentpath: 'test_contentpath',
     position: '',
     localId: 5,
@@ -65,13 +77,14 @@ test('Remote comment added to state', () => {
     originalMentions: [],
     newMentions: [],
     newReply: '',
+    newReplyMentions: [],
     newText: '',
     remoteReplyCount: 0,
     replies: new Map(),
   };
-  const commentAction = actions.addComment(newComment);
+  const commentAction = actions.addComment(commentToAdd);
   const newState = reducer(basicCommentsState, commentAction);
-  expect(newState.comments.get(newComment.localId)).toBe(newComment);
+  expect(newState.comments.get(commentToAdd.localId)).toBe(commentToAdd);
   expect(newState.remoteCommentCount).toBe(
     basicCommentsState.remoteCommentCount + 1,
   );
@@ -168,6 +181,9 @@ test('Reply added', () => {
     text: 'a new reply',
     originalText: 'a new reply',
     newText: '',
+    mentions: [],
+    originalMentions: [],
+    newMentions: [],
     deleted: false,
   };
   const addAction = actions.addReply(1, reply);
@@ -193,6 +209,9 @@ test('Remote reply added', () => {
     text: 'a new reply',
     originalText: 'a new reply',
     newText: '',
+    mentions: [],
+    originalMentions: [],
+    newMentions: [],
     deleted: false,
   };
   const addAction = actions.addReply(1, reply);
@@ -256,4 +275,134 @@ test('Remote reply deleted', () => {
       expect(reply.deleted).toBe(true);
     }
   }
+});
+
+test('new comments own independent copies of every mention occurrence', () => {
+  const mentions = [adaMention];
+  const comment = newComment('', '', 10, null, null, 0, { mentions });
+
+  expect(comment.mentions).toEqual(mentions);
+  expect(comment.originalMentions).toEqual(mentions);
+  expect(comment.newMentions).toEqual([]);
+  expect(comment.newReplyMentions).toEqual([]);
+  expect(comment.mentions).not.toBe(mentions);
+  expect(comment.originalMentions).not.toBe(mentions);
+  expect(comment.originalMentions).not.toBe(comment.mentions);
+  expect(comment.mentions[0]).not.toBe(mentions[0]);
+  expect(comment.originalMentions[0]).not.toBe(comment.mentions[0]);
+});
+
+test('new replies own independent copies of every mention occurrence', () => {
+  const mentions = [adaMention];
+  const reply = newCommentReply(11, null, 0, { mentions });
+
+  expect(reply.mentions).toEqual(mentions);
+  expect(reply.originalMentions).toEqual(mentions);
+  expect(reply.newMentions).toEqual([]);
+  expect(reply.mentions).not.toBe(mentions);
+  expect(reply.originalMentions).not.toBe(mentions);
+  expect(reply.originalMentions).not.toBe(reply.mentions);
+  expect(reply.mentions[0]).not.toBe(mentions[0]);
+  expect(reply.originalMentions[0]).not.toBe(reply.mentions[0]);
+});
+
+test('equal comment editor updates preserve the message mention error', () => {
+  const comment = newComment('', '', 10, null, null, 0, {
+    remoteId: 10,
+    text: 'Hello @Ada',
+    mentions: [adaMention],
+  });
+  comment.mode = 'editing';
+  comment.newText = comment.text;
+  comment.newMentions = [{ ...adaMention }];
+  comment.mentionError = 'Enter a valid mention list.';
+  const state = {
+    ...basicCommentsState,
+    comments: new Map([[comment.localId, comment]]),
+    remoteCommentCount: 1,
+  };
+
+  const equalText = reducer(
+    state,
+    actions.updateComment(comment.localId, { newText: comment.newText }),
+  );
+  const equalMentions = reducer(
+    equalText,
+    actions.updateComment(comment.localId, {
+      newMentions: [{ ...adaMention }],
+    }),
+  );
+
+  expect(equalMentions.comments.get(comment.localId)?.mentionError).toBe(
+    'Enter a valid mention list.',
+  );
+});
+
+test('only a semantic comment editor change clears its mention error', () => {
+  const comment = newComment('', '', 10, null, null, 0, {
+    remoteId: 10,
+    text: 'Hello @Ada',
+    mentions: [adaMention],
+  });
+  comment.mode = 'editing';
+  comment.newText = comment.text;
+  comment.newMentions = [{ ...adaMention }];
+  comment.mentionError = 'Enter a valid mention list.';
+  const state = {
+    ...basicCommentsState,
+    comments: new Map([[comment.localId, comment]]),
+    remoteCommentCount: 1,
+  };
+
+  const changed = reducer(
+    state,
+    actions.updateComment(comment.localId, {
+      newMentions: [{ ...adaMention, label: '@Grace' }],
+    }),
+  );
+
+  expect(changed.comments.get(comment.localId)?.mentionError).toBeUndefined();
+});
+
+test('reply mention errors are isolated from sibling updates', () => {
+  const first = newCommentReply(11, null, 0, {
+    remoteId: 11,
+    text: 'Hello @Ada',
+    mentions: [adaMention],
+  });
+  first.mode = 'editing';
+  first.newText = first.text;
+  first.newMentions = [{ ...adaMention }];
+  first.mentionError = 'Enter a valid mention list.';
+  const sibling = newCommentReply(12, null, 0, {
+    remoteId: 12,
+    text: 'Sibling',
+  });
+  sibling.mentionError = 'Sibling error';
+  const comment = newComment('', '', 10, null, null, 0, {
+    remoteId: 10,
+    replies: new Map([
+      [first.localId, first],
+      [sibling.localId, sibling],
+    ]),
+  });
+  const state = {
+    ...basicCommentsState,
+    comments: new Map([[comment.localId, comment]]),
+    remoteCommentCount: 1,
+  };
+
+  const changed = reducer(
+    state,
+    actions.updateReply(comment.localId, first.localId, {
+      newText: 'Changed',
+    }),
+  );
+
+  expect(
+    changed.comments.get(comment.localId)?.replies.get(11)?.mentionError,
+  ).toBeUndefined();
+  expect(
+    changed.comments.get(comment.localId)?.replies.get(12)?.mentionError,
+  ).toBe('Sibling error');
 });

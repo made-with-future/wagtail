@@ -34,33 +34,42 @@ $box-padding: 20px;
   }
 
   textarea,
-  &__mention-editor {
+  .Draftail-Editor {
     margin: 0;
-    padding: 12px;
     width: 100%;
     background-color: theme('colors.surface-field');
     border: 1px solid theme('colors.border-field-default');
     border-radius: 5px;
     color: $color-box-text;
 
-    &::placeholder {
+    &::placeholder,
+    .public-DraftEditorPlaceholder-root {
       color: theme('colors.text-placeholder');
       opacity: 1;
     }
   }
 
-  &__mention-editor {
+  textarea {
+    padding: 12px;
+  }
+
+  .Draftail-Editor {
+    min-height: 44px;
+
+    &--focus {
+      border-color: theme('colors.border-field-hover');
+    }
+  }
+
+  .public-DraftEditor-content,
+  .public-DraftEditorPlaceholder-root {
+    padding: 12px;
+  }
+
+  .public-DraftEditor-content {
     min-height: 44px;
     line-height: 150%;
-    outline: none;
-    white-space: pre-wrap;
     word-break: break-word;
-
-    &--empty::before {
-      content: attr(data-placeholder);
-      color: theme('colors.text-placeholder');
-      pointer-events: none;
-    }
   }
 
   &__text {
@@ -80,6 +89,18 @@ $box-padding: 20px;
     font-weight: 700;
   }
 
+  &__mention-error,
+  &__mention-status {
+    margin: 6px 0 0;
+    font-size: 13px;
+    line-height: 150%;
+  }
+
+  &__mention-error,
+  &__mention-status--error {
+    color: theme('colors.text-error');
+  }
+
   &__mention-input {
     position: relative;
   }
@@ -95,6 +116,8 @@ $box-padding: 20px;
     border: 1px solid theme('colors.border-field-default');
     border-radius: 3px;
     box-shadow: 0 2px 4px theme('colors.black-10');
+    max-height: 180px;
+    overflow-y: auto;
   }
 
   &__mention-suggestion {
@@ -238,6 +261,22 @@ $box-padding: 20px;
   &__reply-input {
     /* stylelint-disable-next-line declaration-no-important */
     margin-top: 20px !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .comment__mention {
+    color: LinkText;
+    outline: 1px solid currentColor;
+  }
+
+  .comment__mention-suggestion--highlighted {
+    color: HighlightText;
+    background-color: Highlight;
+  }
+
+  .comment__mention-error {
+    color: Mark;
   }
 }
 

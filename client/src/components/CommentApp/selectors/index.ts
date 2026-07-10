@@ -1,6 +1,8 @@
 import type { State } from '../state';
-import type { Comment, Mention } from '../state/comments';
+import type { Comment } from '../state/comments';
+import type { MentionOccurrence } from '../utils/mentions';
 import { createSelector } from 'reselect';
+import { serializeMentionOccurrences } from '../utils/mentions';
 
 export const selectComments = (state: State) => state.comments.comments;
 export const selectFocused = (state: State) => state.comments.focusedComment;
@@ -31,17 +33,17 @@ export const selectIsDirty = createSelector(
   selectComments,
   selectRemoteCommentCount,
   (comments, remoteCommentCount) => {
-    const mentionIdsChanged = (original: Mention[], current: Mention[]) => {
-      // Compare ids only; label/email changes should not make the comment dirty.
-      const originalIds = original.map((mention) => String(mention.id)).sort();
-      const currentIds = current.map((mention) => String(mention.id)).sort();
-      return originalIds.join('\n') !== currentIds.join('\n');
-    };
+    const mentionsChanged = (
+      original: readonly MentionOccurrence[],
+      current: readonly MentionOccurrence[],
+    ) =>
+      JSON.stringify(serializeMentionOccurrences(original)) !==
+      JSON.stringify(serializeMentionOccurrences(current));
 
     const readyComments = Array.from(comments.values()).filter(
-      // `creating` means the user can still type the new comment and has not
-      // "committed" it by clicking "Comment", so don't count it yet
-      (comment) => comment.mode !== 'creating',
+      // An empty `creating` comment is still an uncommitted editor draft. A
+      // canonical value means the comment is already part of the hidden form.
+      (comment) => comment.mode !== 'creating' || comment.text.length > 0,
     );
     if (remoteCommentCount !== readyComments.length) {
       return true;
@@ -52,12 +54,15 @@ export const selectIsDirty = createSelector(
         comment.resolved ||
         comment.replies.size !== comment.remoteReplyCount ||
         comment.originalText !== comment.text ||
-        mentionIdsChanged(comment.originalMentions, comment.mentions)
+        mentionsChanged(comment.originalMentions, comment.mentions)
       ) {
         return true;
       }
       return Array.from(comment.replies.values()).some(
-        (reply) => reply.deleted || reply.originalText !== reply.text,
+        (reply) =>
+          reply.deleted ||
+          reply.originalText !== reply.text ||
+          mentionsChanged(reply.originalMentions, reply.mentions),
       );
     });
   },

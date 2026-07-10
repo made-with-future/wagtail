@@ -9,6 +9,9 @@ const remoteReply: CommentReply = {
   text: 'a reply',
   originalText: 'a reply',
   newText: '',
+  mentions: [],
+  originalMentions: [],
+  newMentions: [],
   deleted: false,
 };
 
@@ -21,6 +24,9 @@ const localReply: CommentReply = {
   text: 'another reply',
   originalText: 'another new reply',
   newText: '',
+  mentions: [],
+  originalMentions: [],
+  newMentions: [],
   deleted: false,
 };
 
@@ -35,26 +41,29 @@ const remoteComment: Comment = {
   resolved: false,
   author: { id: 1, name: 'test user' },
   date: 0,
-  text: 'test text',
-  originalText: 'test text',
+  text: 'test text @Ada',
+  originalText: 'test text @Ada',
   mentions: [
     {
-      id: 2,
-      name: 'Mentioned User',
-      email: 'mentioned@example.com',
-      url: '/admin/users/2/',
+      key: 'fixture-ada',
+      userId: '2',
+      start: 10,
+      end: 14,
+      label: '@Ada',
     },
   ],
   originalMentions: [
     {
-      id: 2,
-      name: 'Mentioned User',
-      email: 'mentioned@example.com',
-      url: '/admin/users/2/',
+      key: 'fixture-ada',
+      userId: '2',
+      start: 10,
+      end: 14,
+      label: '@Ada',
     },
   ],
   newMentions: [],
   newReply: '',
+  newReplyMentions: [],
   newText: '',
   remoteReplyCount: 1,
   replies: new Map([
@@ -80,6 +89,7 @@ const localComment: Comment = {
   originalMentions: [],
   newMentions: [],
   newReply: '',
+  newReplyMentions: [],
   newText: '',
   replies: new Map(),
   remoteReplyCount: 0,

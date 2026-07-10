@@ -1,6 +1,8 @@
 import type { Annotation } from '../utils/annotation';
+import type { MentionOccurrence } from '../utils/mentions';
 import { enableMapSet, produce } from 'immer';
 import * as actions from '../actions/comments';
+import { serializeMentionOccurrences } from '../utils/mentions';
 import { resetCommentAndReplyIds } from '../utils/sequences';
 
 enableMapSet();
@@ -9,16 +11,18 @@ export interface Author {
   id: any;
   name: string;
   avatarUrl?: string;
-  email?: string;
-  url?: string;
 }
 
-export interface Mention {
-  id: any;
-  name: string;
-  email: string;
-  url: string;
-}
+const copyMentions = (
+  mentions: readonly MentionOccurrence[],
+): MentionOccurrence[] => mentions.map((mention) => ({ ...mention }));
+
+const mentionsEqual = (
+  left: readonly MentionOccurrence[],
+  right: readonly MentionOccurrence[],
+) =>
+  JSON.stringify(serializeMentionOccurrences(left)) ===
+  JSON.stringify(serializeMentionOccurrences(right));
 
 export type CommentReplyMode =
   | 'default'
@@ -47,6 +51,10 @@ export interface CommentReply {
   text: string;
   originalText: string;
   newText: string;
+  mentions: MentionOccurrence[];
+  originalMentions: MentionOccurrence[];
+  newMentions: MentionOccurrence[];
+  mentionError?: string;
 }
 
 export interface NewReplyOptions {
@@ -54,6 +62,7 @@ export interface NewReplyOptions {
   mode?: CommentReplyMode;
   text?: string;
   deleted?: boolean;
+  mentions?: readonly MentionOccurrence[];
 }
 
 export function newCommentReply(
@@ -65,6 +74,7 @@ export function newCommentReply(
     mode = 'default',
     text = '',
     deleted = false,
+    mentions = [],
   }: NewReplyOptions,
 ): CommentReply {
   return {
@@ -76,11 +86,16 @@ export function newCommentReply(
     text,
     originalText: text,
     newText: '',
+    mentions: copyMentions(mentions),
+    originalMentions: copyMentions(mentions),
+    newMentions: [],
     deleted,
   };
 }
 
-export type CommentReplyUpdate = Partial<Omit<CommentReply, 'originalText'>>;
+export type CommentReplyUpdate = Partial<
+  Omit<CommentReply, 'originalText' | 'originalMentions'>
+>;
 
 export type CommentMode =
   | 'default'
@@ -121,9 +136,11 @@ export interface Comment {
    * Mirrors the text fields: mentions is saved state, originalMentions is used
    * for dirty checks, and newMentions is the working copy while editing.
    */
-  mentions: Mention[];
-  originalMentions: Mention[];
-  newMentions: Mention[];
+  mentions: MentionOccurrence[];
+  originalMentions: MentionOccurrence[];
+  newMentions: MentionOccurrence[];
+  newReplyMentions: MentionOccurrence[];
+  mentionError?: string;
 }
 
 export interface NewCommentOptions {
@@ -133,7 +150,7 @@ export interface NewCommentOptions {
   resolved?: boolean;
   deleted?: boolean;
   replies?: Map<number, CommentReply>;
-  mentions?: Mention[];
+  mentions?: readonly MentionOccurrence[];
 }
 
 export function newComment(
@@ -164,11 +181,12 @@ export function newComment(
     date,
     text,
     originalText: text,
-    mentions,
-    originalMentions: mentions,
+    mentions: copyMentions(mentions),
+    originalMentions: copyMentions(mentions),
     newMentions: [],
     replies,
     newReply: '',
+    newReplyMentions: [],
     newText: '',
     deleted,
     resolved,
@@ -250,7 +268,35 @@ export const reducer = produce(
           if (action.update.newText && action.update.newText.length === 0) {
             break;
           }
-          Object.assign(comment, action.update);
+          const textChanged =
+            action.update.newText !== undefined &&
+            action.update.newText !== comment.newText;
+          const mentionsChanged =
+            action.update.newMentions !== undefined &&
+            !mentionsEqual(comment.newMentions, action.update.newMentions);
+
+          if (
+            (textChanged || mentionsChanged) &&
+            action.update.mentionError === undefined
+          ) {
+            delete comment.mentionError;
+          }
+
+          Object.assign(comment, action.update, {
+            ...(action.update.mentions === undefined
+              ? {}
+              : { mentions: copyMentions(action.update.mentions) }),
+            ...(action.update.newMentions === undefined
+              ? {}
+              : { newMentions: copyMentions(action.update.newMentions) }),
+            ...(action.update.newReplyMentions === undefined
+              ? {}
+              : {
+                  newReplyMentions: copyMentions(
+                    action.update.newReplyMentions,
+                  ),
+                }),
+          });
         }
         break;
       }
@@ -305,7 +351,28 @@ export const reducer = produce(
         if (action.update.newText && action.update.newText.length === 0) {
           break;
         }
-        Object.assign(reply, action.update);
+        const textChanged =
+          action.update.newText !== undefined &&
+          action.update.newText !== reply.newText;
+        const mentionsChanged =
+          action.update.newMentions !== undefined &&
+          !mentionsEqual(reply.newMentions, action.update.newMentions);
+
+        if (
+          (textChanged || mentionsChanged) &&
+          action.update.mentionError === undefined
+        ) {
+          delete reply.mentionError;
+        }
+
+        Object.assign(reply, action.update, {
+          ...(action.update.mentions === undefined
+            ? {}
+            : { mentions: copyMentions(action.update.mentions) }),
+          ...(action.update.newMentions === undefined
+            ? {}
+            : { newMentions: copyMentions(action.update.newMentions) }),
+        });
         break;
       }
       case actions.DELETE_REPLY: {

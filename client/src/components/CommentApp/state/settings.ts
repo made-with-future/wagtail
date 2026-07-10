@@ -1,3 +1,4 @@
+import type { MentionedUser } from '../utils/mentions';
 import type { Author } from './comments';
 import { produce } from 'immer';
 import * as actions from '../actions/settings';
@@ -7,6 +8,7 @@ export interface SettingsState {
   currentTab: string | null;
   isReloading: boolean;
   mentionSuggestionsUrl?: string;
+  mentionedUsers: Record<string, MentionedUser>;
 }
 
 export type SettingsStateUpdate = Partial<SettingsState>;
@@ -17,6 +19,7 @@ export const INITIAL_STATE: SettingsState = {
   currentTab: null,
   isReloading: false,
   mentionSuggestionsUrl: undefined,
+  mentionedUsers: {},
 };
 
 export const reducer = produce(
