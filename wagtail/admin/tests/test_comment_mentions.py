@@ -3,16 +3,26 @@ import uuid
 from unittest import mock
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group, Permission
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
-from django.test import SimpleTestCase, TestCase
+from django.db.models.base import ModelBase
+from django.test import SimpleTestCase, TestCase, override_settings
+from django.urls import reverse
 
 from wagtail.admin.comment_mentions import (
     MAX_MENTION_JSON_BYTES,
     MAX_MENTION_LABEL_UTF16,
+    comments_available_for_page_model,
     compare_mentions,
     current_mention_email,
+    future_page_mention_candidates,
     normalize_mention_label,
+    page_mention_candidates,
+    resolve_creatable_page_model,
+    resolve_new_mention_users,
     sanitize_stored_mentions,
+    search_mention_candidates,
     split_text_by_mentions,
     truncate_utf16,
     utf16_length,
@@ -20,6 +30,10 @@ from wagtail.admin.comment_mentions import (
     validate_mention_occurrences,
     validate_retained_mentions,
 )
+from wagtail.exceptions import PageClassNotFoundError
+from wagtail.models import GroupPagePermission, Page
+from wagtail.test.testapp.models import BusinessChild, SimplePage, SingletonPage
+from wagtail.test.utils import WagtailTestUtils
 
 MENTION_KEY = "29cc6a1f-00ed-41d7-94b1-d46a947962cb"
 SECOND_MENTION_KEY = "327547cc-f9ee-4bce-852f-bf96f14179b9"
@@ -491,3 +505,562 @@ class TestMentionLabels(TestCase):
             ):
                 values[field] = value
         return user_model(**values)
+
+
+class MentionCandidateTestMixin(WagtailTestUtils):
+    def setUp(self):
+        super().setUp()
+        self.root_page = Page.objects.get(pk=2)
+        self._group_number = 0
+
+    def create_candidate(
+        self,
+        username,
+        *,
+        email=None,
+        first_name="",
+        last_name="",
+        active=True,
+        superuser=False,
+    ):
+        user_model = get_user_model()
+        values = {
+            user_model.USERNAME_FIELD: (
+                email
+                if user_model.USERNAME_FIELD == user_model.get_email_field_name()
+                and email is not None
+                else (
+                    f"{username}@example.com"
+                    if user_model.USERNAME_FIELD == user_model.get_email_field_name()
+                    else username
+                )
+            ),
+            "password": "password",
+        }
+        field_names = {field.name for field in user_model._meta.fields}
+        email_field = user_model.get_email_field_name()
+        if email_field in field_names:
+            values[email_field] = (
+                email if email is not None else f"{username}@example.com"
+            )
+        if "first_name" in field_names:
+            values["first_name"] = first_name
+        if "last_name" in field_names:
+            values["last_name"] = last_name
+        manager_method = (
+            user_model._default_manager.create_superuser
+            if superuser
+            else user_model._default_manager.create_user
+        )
+        user = manager_method(**values)
+        if not active:
+            user.is_active = False
+            user.save(update_fields=["is_active"])
+        return user
+
+    def grant_admin_access(self, user, *, direct=False):
+        permission = Permission.objects.get(
+            content_type__app_label="wagtailadmin",
+            codename="access_admin",
+        )
+        if direct:
+            user.user_permissions.add(permission)
+            return
+        group = self.create_group("admin")
+        group.permissions.add(permission)
+        group.user_set.add(user)
+
+    def grant_page_permission(self, user, action, page):
+        group = self.create_group(f"{action}-page")
+        group.user_set.add(user)
+        GroupPagePermission.objects.create(
+            group=group,
+            page=page,
+            permission=Permission.objects.get(
+                content_type=ContentType.objects.get_for_model(Page),
+                codename=f"{action}_page",
+            ),
+        )
+
+    def create_group(self, purpose):
+        self._group_number += 1
+        return Group.objects.create(name=f"mention-{purpose}-{self._group_number}")
+
+    def create_page(self, *, owner=None, slug="mention-candidates"):
+        page = SimplePage(
+            title="Mention candidates",
+            slug=slug,
+            content="Candidate permissions",
+            owner=owner,
+        )
+        self.root_page.add_child(instance=page)
+        return page
+
+    def make_eligible(self, user, *, page, action="change", direct_admin=False):
+        self.grant_admin_access(user, direct=direct_admin)
+        self.grant_page_permission(user, action, page)
+        return user
+
+    def expected_result(self, user):
+        email = current_mention_email(user)
+        label = normalize_mention_label(user)
+        result = {
+            "id": str(user.pk),
+            "label": label,
+            "email": email,
+        }
+        username = str(user.get_username())
+        if username and username not in {email, label.removeprefix("@")}:
+            result["username"] = username
+        return result
+
+
+class TestPageMentionCandidates(MentionCandidateTestMixin, TestCase):
+    def test_page_permissions_admin_access_activity_and_superuser_are_filtered(self):
+        owner = self.create_candidate("owner", email="owner@example.com")
+        page = self.create_page(owner=owner)
+        self.grant_admin_access(owner, direct=True)
+        self.grant_page_permission(owner, "add", self.root_page)
+
+        direct = self.create_candidate("direct", email="direct@example.com")
+        self.make_eligible(direct, page=page, direct_admin=True)
+        inherited = self.create_candidate("inherited", email="inherited@example.com")
+        self.make_eligible(inherited, page=self.root_page)
+        add_non_owner = self.create_candidate(
+            "add-non-owner", email="add-non-owner@example.com"
+        )
+        self.make_eligible(add_non_owner, page=self.root_page, action="add")
+        no_admin = self.create_candidate("no-admin", email="no-admin@example.com")
+        self.grant_page_permission(no_admin, "change", page)
+        inactive = self.create_candidate(
+            "inactive", email="inactive@example.com", active=False
+        )
+        self.make_eligible(inactive, page=page)
+        superuser = self.create_candidate(
+            "superuser", email="superuser@example.com", superuser=True
+        )
+
+        candidate_ids = {str(user.pk) for user in page_mention_candidates(page)}
+
+        self.assertEqual(
+            candidate_ids,
+            {
+                str(owner.pk),
+                str(direct.pk),
+                str(inherited.pk),
+                str(superuser.pk),
+            },
+        )
+
+    def test_search_filters_before_slice_orders_deterministically_and_is_bounded(self):
+        page = self.create_page()
+        for index in range(10):
+            inactive = self.create_candidate(
+                f"needle-{index:02d}-inactive",
+                email=f"needle-{index:02d}-inactive@example.com",
+                active=False,
+            )
+            self.make_eligible(inactive, page=page)
+        active_users = []
+        for index in reversed(range(12)):
+            user = self.create_candidate(
+                f"needle-{index:02d}-active",
+                email=f"needle-{index:02d}-active@example.com",
+            )
+            self.make_eligible(user, page=page)
+            active_users.append(user)
+
+        expected = sorted(
+            active_users, key=lambda user: (user.get_username(), user.pk)
+        )[:10]
+        with self.assertNumQueries(2):
+            results = search_mention_candidates(page_mention_candidates(page), "needle")
+
+        self.assertEqual(results, [self.expected_result(user) for user in expected])
+        self.assertEqual(len(results), 10)
+
+    def test_empty_and_overlong_queries_do_not_enumerate_candidates(self):
+        page = self.create_page()
+        candidate = self.create_candidate("candidate", email="candidate@example.com")
+        self.make_eligible(candidate, page=page)
+        candidates = page_mention_candidates(page)
+
+        with self.assertNumQueries(0):
+            self.assertEqual(search_mention_candidates(candidates, ""), [])
+            self.assertEqual(search_mention_candidates(candidates, "a" * 65), [])
+            self.assertEqual(search_mention_candidates(candidates, "😀" * 33), [])
+
+    def test_new_target_resolution_uses_prepared_identity_and_exact_current_label(self):
+        page = self.create_page()
+        candidate = self.create_candidate("candidate", email="candidate@example.com")
+        self.make_eligible(candidate, page=page)
+        pk_field = get_user_model()._meta.pk
+        prepared_id = str(pk_field.get_prep_value(candidate.pk))
+        valid = mention_occurrence(
+            user_id=prepared_id,
+            end=len("@candidate@example.com"),
+            label="@candidate@example.com",
+        )
+
+        resolved = resolve_new_mention_users((valid,), page_mention_candidates(page))
+
+        self.assertEqual(resolved, (candidate,))
+
+        second = self.create_candidate("second", email="second@example.com")
+        self.make_eligible(second, page=page)
+        same_key_different_target = valid | {
+            "user_id": str(second.pk),
+            "label": "@second@example.com",
+        }
+        self.assertEqual(
+            resolve_new_mention_users(
+                (valid, same_key_different_target), page_mention_candidates(page)
+            ),
+            (candidate, second),
+        )
+
+        invalid_label = valid | {"label": "@forged@example.com"}
+        with self.assertRaises(ValidationError):
+            resolve_new_mention_users((invalid_label,), page_mention_candidates(page))
+
+
+class TestFuturePageMentionCandidates(MentionCandidateTestMixin, TestCase):
+    def test_change_add_owner_admin_activity_and_superuser_are_filtered(self):
+        owner = self.create_candidate("owner", email="owner@example.com")
+        parent = self.create_page(owner=owner, slug="future-parent")
+        self.grant_admin_access(owner, direct=True)
+        self.grant_page_permission(owner, "add", self.root_page)
+
+        changer = self.create_candidate("changer", email="changer@example.com")
+        self.make_eligible(changer, page=self.root_page)
+        direct_changer = self.create_candidate(
+            "direct-changer", email="direct-changer@example.com"
+        )
+        self.make_eligible(direct_changer, page=parent, direct_admin=True)
+        add_non_owner = self.create_candidate(
+            "add-non-owner", email="add-non-owner@example.com"
+        )
+        self.make_eligible(add_non_owner, page=self.root_page, action="add")
+        no_admin = self.create_candidate("no-admin", email="no-admin@example.com")
+        self.grant_page_permission(no_admin, "change", parent)
+        inactive = self.create_candidate(
+            "inactive", email="inactive@example.com", active=False
+        )
+        self.make_eligible(inactive, page=parent)
+        superuser = self.create_candidate(
+            "superuser", email="superuser@example.com", superuser=True
+        )
+
+        candidate_ids = {
+            str(user.pk)
+            for user in future_page_mention_candidates(
+                parent_page=parent,
+                owner=owner,
+            )
+        }
+
+        self.assertEqual(
+            candidate_ids,
+            {
+                str(owner.pk),
+                str(changer.pk),
+                str(direct_changer.pk),
+                str(superuser.pk),
+            },
+        )
+
+
+class TestPageMentionSuggestionView(MentionCandidateTestMixin, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.requester = self.create_candidate(
+            "requester", email="requester@example.com", superuser=True
+        )
+        self.page = self.create_page(owner=self.requester)
+        self.editor = self.create_candidate("jane", email="jane@example.com")
+        self.make_eligible(self.editor, page=self.page)
+        self.client.force_login(self.requester)
+        self.url = reverse(
+            "wagtailadmin_pages:comment_mention_suggestions",
+            args=[self.page.pk],
+        )
+
+    def test_response_has_exact_minimal_wire_shape(self):
+        response = self.client.get(self.url, {"q": "jane"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertJSONEqual(
+            response.content,
+            {"results": [self.expected_result(self.editor)]},
+        )
+        result = response.json()["results"][0]
+        self.assertIsInstance(result["id"], str)
+        self.assertNotIn("url", result)
+        self.assertNotIn("notification_preferences", result)
+        self.assertNotIn("permissions", result)
+
+    def test_available_name_fields_and_fallback_labels_are_searchable(self):
+        fallback = self.create_candidate(
+            "fallback",
+            email="",
+            first_name="Blank",
+            last_name="Candidate",
+        )
+        self.make_eligible(fallback, page=self.page)
+
+        response = self.client.get(self.url, {"q": "Blank"})
+
+        self.assertJSONEqual(
+            response.content,
+            {"results": [self.expected_result(fallback)]},
+        )
+        self.assertEqual(response.json()["results"][0]["email"], "")
+        self.assertEqual(response.json()["results"][0]["label"], "@Blank Candidate")
+
+    def test_username_fallback_is_not_repeated_as_a_secondary_value(self):
+        if get_user_model().USERNAME_FIELD == get_user_model().get_email_field_name():
+            self.skipTest("Configured username is the required email field")
+        fallback = self.create_candidate("only-username", email="")
+        self.make_eligible(fallback, page=self.page)
+
+        response = self.client.get(self.url, {"q": "only-username"})
+
+        self.assertJSONEqual(
+            response.content,
+            {
+                "results": [
+                    {
+                        "id": str(fallback.pk),
+                        "label": "@only-username",
+                        "email": "",
+                    }
+                ]
+            },
+        )
+
+    def test_overlong_label_is_truncated_within_the_wire_limit(self):
+        long_email = f"{'a' * 64}@{'b' * 63}.{'c' * 63}.{'d' * 62}"
+        self.assertEqual(len(long_email), 255)
+        candidate = self.create_candidate("long-label", email=long_email)
+        self.make_eligible(candidate, page=self.page)
+
+        response = self.client.get(self.url, {"q": "aaaa"})
+
+        result = response.json()["results"][0]
+        self.assertEqual(utf16_length(result["label"]), MAX_MENTION_LABEL_UTF16)
+        self.assertTrue(result["label"].endswith("…"))
+        self.assertEqual(result["email"], long_email)
+
+    def test_empty_and_overlong_queries_return_no_results(self):
+        self.assertJSONEqual(self.client.get(self.url).content, {"results": []})
+        self.assertJSONEqual(
+            self.client.get(self.url, {"q": "a" * 65}).content,
+            {"results": []},
+        )
+
+    @override_settings(WAGTAILADMIN_COMMENTS_ENABLED=False)
+    def test_comments_disabled_returns_not_found(self):
+        self.assertEqual(self.client.get(self.url, {"q": "jane"}).status_code, 404)
+
+    def test_page_model_without_comment_formset_returns_not_found(self):
+        original_settings_panels = SimplePage.settings_panels
+        SimplePage.settings_panels = []
+        SimplePage.get_edit_handler.cache_clear()
+        try:
+            response = self.client.get(self.url, {"q": "jane"})
+        finally:
+            SimplePage.settings_panels = original_settings_panels
+            SimplePage.get_edit_handler.cache_clear()
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_requester_without_page_edit_permission_is_forbidden(self):
+        requester = self.create_candidate(
+            "unauthorized", email="unauthorized@example.com"
+        )
+        self.grant_admin_access(requester)
+        self.client.force_login(requester)
+
+        self.assertEqual(
+            self.client.get(
+                self.url,
+                {"q": "jane"},
+                headers={"x-requested-with": "XMLHttpRequest"},
+            ).status_code,
+            403,
+        )
+
+    @mock.patch("wagtail.models.ContentType.model_class", return_value=None)
+    def test_stale_page_content_type_raises_page_class_not_found(self, model_class):
+        with self.assertRaises(PageClassNotFoundError):
+            self.client.get(self.url, {"q": "jane"})
+
+
+class TestCreateMentionSuggestionView(MentionCandidateTestMixin, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.requester = self.create_candidate("owner", email="owner@example.com")
+        self.make_eligible(self.requester, page=self.root_page, action="add")
+        self.editor = self.create_candidate("jane", email="jane@example.com")
+        self.make_eligible(self.editor, page=self.root_page)
+        self.client.force_login(self.requester)
+        self.url = reverse(
+            "wagtailadmin_pages:create_comment_mention_suggestions",
+            args=["tests", "simplepage", self.root_page.pk],
+        )
+
+    def test_response_has_exact_minimal_wire_shape(self):
+        response = self.client.get(self.url, {"q": "jane"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertJSONEqual(
+            response.content,
+            {"results": [self.expected_result(self.editor)]},
+        )
+
+    def test_requester_without_parent_add_permission_is_forbidden(self):
+        requester = self.create_candidate(
+            "unauthorized", email="unauthorized@example.com"
+        )
+        self.grant_admin_access(requester)
+        self.client.force_login(requester)
+
+        self.assertEqual(
+            self.client.get(
+                self.url,
+                {"q": "jane"},
+                headers={"x-requested-with": "XMLHttpRequest"},
+            ).status_code,
+            403,
+        )
+
+    def test_invalid_parent_content_type_and_page_model_are_rejected(self):
+        ContentType.objects.create(app_label="stale", model="missingpage")
+        cases = (
+            (
+                "missing-parent",
+                reverse(
+                    "wagtailadmin_pages:create_comment_mention_suggestions",
+                    args=["tests", "simplepage", 999999],
+                ),
+                404,
+            ),
+            (
+                "missing-type",
+                reverse(
+                    "wagtailadmin_pages:create_comment_mention_suggestions",
+                    args=["tests", "missingpage", self.root_page.pk],
+                ),
+                404,
+            ),
+            (
+                "non-page-model",
+                reverse(
+                    "wagtailadmin_pages:create_comment_mention_suggestions",
+                    args=["auth", "group", self.root_page.pk],
+                ),
+                404,
+            ),
+            (
+                "stale-content-type",
+                reverse(
+                    "wagtailadmin_pages:create_comment_mention_suggestions",
+                    args=["stale", "missingpage", self.root_page.pk],
+                ),
+                404,
+            ),
+            (
+                "disallowed-page-model",
+                reverse(
+                    "wagtailadmin_pages:create_comment_mention_suggestions",
+                    args=[
+                        BusinessChild._meta.app_label,
+                        BusinessChild._meta.model_name,
+                        self.root_page.pk,
+                    ],
+                ),
+                403,
+            ),
+        )
+
+        for name, url, status_code in cases:
+            with self.subTest(name=name):
+                request_kwargs = (
+                    {"headers": {"x-requested-with": "XMLHttpRequest"}}
+                    if status_code == 403
+                    else {}
+                )
+                self.assertEqual(
+                    self.client.get(url, {"q": "jane"}, **request_kwargs).status_code,
+                    status_code,
+                )
+
+    def test_route_selects_the_custom_viewset_for_the_child_page_model(self):
+        url = reverse(
+            "wagtailadmin_pages:create_comment_mention_suggestions",
+            args=["tests", "eventpage", self.root_page.pk],
+        )
+
+        response = self.client.get(url, {"q": "jane"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["X-Wagtail-ViewSet"], "EventPageViewSet")
+
+    def test_model_can_create_at_gate_is_enforced(self):
+        existing = SingletonPage(title="Only singleton", slug="only-singleton")
+        self.root_page.add_child(instance=existing)
+        url = reverse(
+            "wagtailadmin_pages:create_comment_mention_suggestions",
+            args=[
+                SingletonPage._meta.app_label,
+                SingletonPage._meta.model_name,
+                self.root_page.pk,
+            ],
+        )
+
+        self.assertEqual(
+            self.client.get(
+                url,
+                {"q": "jane"},
+                headers={"x-requested-with": "XMLHttpRequest"},
+            ).status_code,
+            403,
+        )
+
+    @override_settings(WAGTAILADMIN_COMMENTS_ENABLED=False)
+    def test_comments_disabled_returns_not_found(self):
+        self.assertEqual(self.client.get(self.url, {"q": "jane"}).status_code, 404)
+
+    def test_page_model_without_comment_formset_returns_not_found(self):
+        original_settings_panels = SimplePage.settings_panels
+        SimplePage.settings_panels = []
+        SimplePage.get_edit_handler.cache_clear()
+        try:
+            response = self.client.get(self.url, {"q": "jane"})
+        finally:
+            SimplePage.settings_panels = original_settings_panels
+            SimplePage.get_edit_handler.cache_clear()
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_public_model_resolver_returns_only_the_authorized_page_model(self):
+        request = mock.Mock(user=self.requester)
+
+        page_model = resolve_creatable_page_model(
+            request=request,
+            parent_page=self.root_page,
+            app_label="tests",
+            model_name="simplepage",
+        )
+
+        self.assertIsInstance(page_model, ModelBase)
+        self.assertIs(page_model, SimplePage)
+
+
+class TestCommentAvailability(SimpleTestCase):
+    @override_settings(WAGTAILADMIN_COMMENTS_ENABLED=False)
+    def test_setting_disables_comments_before_edit_handler_lookup(self):
+        with mock.patch.object(SimplePage, "get_edit_handler") as get_edit_handler:
+            self.assertFalse(comments_available_for_page_model(SimplePage))
+
+        get_edit_handler.assert_not_called()

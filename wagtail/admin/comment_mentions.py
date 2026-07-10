@@ -5,10 +5,18 @@ import uuid
 from dataclasses import dataclass
 from typing import Sequence, TypedDict
 
-from django.contrib.auth import get_user_model
-from django.core.exceptions import ValidationError
+from django.conf import settings
+from django.contrib.auth import get_permission_codename, get_user_model
+from django.contrib.auth.models import Permission
+from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import PermissionDenied, ValidationError
+from django.db.models import Q
+from django.http import Http404
+from django.utils.translation import gettext_lazy as _
 
 from wagtail.admin.templatetags.wagtailadmin_tags import user_display_name
+from wagtail.models import GroupPagePermission, Page
+from wagtail.permissions import page_permission_policy
 
 MAX_MENTIONS = 20
 MAX_MENTION_LABEL_UTF16 = 255
@@ -33,6 +41,188 @@ class MentionOccurrence(TypedDict):
 class MentionChanges:
     added: tuple[MentionOccurrence, ...] = ()
     removed: tuple[MentionOccurrence, ...] = ()
+
+
+class InvalidMentionTargets(ValidationError):
+    def __init__(self, invalid_indices):
+        self.invalid_indices = tuple(invalid_indices)
+        super().__init__(_(_INVALID_MENTIONS_MESSAGE), code="invalid")
+
+
+def users_with_admin_access(queryset):
+    access_admin = Permission.objects.get(
+        content_type__app_label="wagtailadmin",
+        codename="access_admin",
+    )
+    return (
+        queryset.filter(is_active=True)
+        .filter(
+            Q(is_superuser=True)
+            | Q(user_permissions=access_admin)
+            | Q(groups__permissions=access_admin)
+        )
+        .distinct()
+    )
+
+
+def page_mention_candidates(page):
+    return users_with_admin_access(
+        page_permission_policy.users_with_permission_for_instance("change", page)
+    )
+
+
+def future_page_mention_candidates(*, parent_page, owner):
+    ancestors = parent_page.get_ancestors(inclusive=True)
+    change_groups = GroupPagePermission.objects.filter(
+        page__in=ancestors,
+        permission__codename=get_permission_codename("change", Page._meta),
+    ).values("group_id")
+    add_groups = GroupPagePermission.objects.filter(
+        page__in=ancestors,
+        permission__codename=get_permission_codename("add", Page._meta),
+    ).values("group_id")
+    users = (
+        get_user_model()
+        ._default_manager.filter(is_active=True)
+        .filter(
+            Q(is_superuser=True)
+            | Q(groups__in=change_groups)
+            | (Q(pk=owner.pk) & Q(groups__in=add_groups))
+        )
+    )
+    return users_with_admin_access(users)
+
+
+def comments_available_for_page_model(page_model: type[Page]) -> bool:
+    if not getattr(settings, "WAGTAILADMIN_COMMENTS_ENABLED", True):
+        return False
+    form_class = page_model.get_edit_handler().get_form_class()
+    return "comments" in form_class.formsets
+
+
+def _mention_search_fields():
+    user_model = get_user_model()
+    available_fields = {field.name for field in user_model._meta.concrete_fields}
+    fields = []
+    for field_name in (
+        "first_name",
+        "last_name",
+        user_model.get_email_field_name(),
+        user_model.USERNAME_FIELD,
+    ):
+        if field_name in available_fields and field_name not in fields:
+            fields.append(field_name)
+    return fields
+
+
+def search_mention_candidates(candidates, query: str) -> list[dict[str, str]]:
+    if not isinstance(query, str):
+        return []
+    query = query.strip()
+    try:
+        if not query or utf16_length(query) > MAX_QUERY_UTF16:
+            return []
+    except ValidationError:
+        return []
+
+    search_filter = Q()
+    for field_name in _mention_search_fields():
+        search_filter |= Q(**{f"{field_name}__icontains": query})
+
+    user_model = get_user_model()
+    users = (
+        candidates.filter(search_filter)
+        .distinct()
+        .order_by(
+            user_model.USERNAME_FIELD,
+            user_model._meta.pk.name,
+        )[:RESULT_LIMIT]
+    )
+    results = []
+    for user in users:
+        email = current_mention_email(user)
+        label = normalize_mention_label(user)
+        result = {
+            "id": str(user.pk),
+            "label": label,
+            "email": email,
+        }
+        username = str(user.get_username())
+        normalized_username = re.sub(r"\s+", " ", username).strip()
+        if normalized_username and normalized_username not in {
+            email,
+            label.removeprefix("@"),
+        }:
+            result["username"] = username
+        results.append(result)
+    return results
+
+
+def resolve_new_mention_users(occurrences, candidates) -> tuple[object, ...]:
+    occurrences = tuple(occurrences)
+    if not occurrences:
+        return ()
+
+    user_model = get_user_model()
+    pk_field = user_model._meta.pk
+    prepared_ids = []
+    invalid_indices = []
+    for index, occurrence in enumerate(occurrences):
+        try:
+            parsed_id = pk_field.to_python(occurrence["user_id"])
+            prepared_id = pk_field.get_prep_value(parsed_id)
+        except (KeyError, OverflowError, TypeError, ValueError, ValidationError):
+            invalid_indices.append(index)
+            prepared_ids.append(None)
+        else:
+            prepared_ids.append(str(prepared_id))
+
+    query_ids = {prepared_id for prepared_id in prepared_ids if prepared_id is not None}
+    try:
+        users = list(candidates.filter(pk__in=query_ids)) if query_ids else []
+    except (OverflowError, TypeError, ValueError, ValidationError) as error:
+        raise InvalidMentionTargets(range(len(occurrences))) from error
+    users_by_prepared_id = {
+        str(pk_field.get_prep_value(user.pk)): user for user in users
+    }
+
+    resolved = []
+    invalid_index_set = set(invalid_indices)
+    for index, (occurrence, prepared_id) in enumerate(
+        zip(occurrences, prepared_ids, strict=True)
+    ):
+        user = users_by_prepared_id.get(prepared_id)
+        if user is None or occurrence.get("label") != normalize_mention_label(user):
+            invalid_index_set.add(index)
+            resolved.append(None)
+        else:
+            resolved.append(user)
+
+    if invalid_index_set:
+        raise InvalidMentionTargets(sorted(invalid_index_set))
+    return tuple(resolved)
+
+
+def resolve_creatable_page_model(
+    request, parent_page, app_label, model_name
+) -> type[Page]:
+    if not parent_page.permissions_for_user(request.user).can_add_subpage():
+        raise PermissionDenied
+    try:
+        page_content_type = ContentType.objects.get_by_natural_key(
+            app_label, model_name
+        )
+    except ContentType.DoesNotExist as error:
+        raise Http404 from error
+
+    page_model = page_content_type.model_class()
+    if page_model is None or not issubclass(page_model, Page):
+        raise Http404
+    if page_model not in parent_page.creatable_subpage_models():
+        raise PermissionDenied
+    if not page_model.can_create_at(parent_page):
+        raise PermissionDenied
+    return page_model
 
 
 def utf16_length(value: str) -> int:

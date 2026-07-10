@@ -18,11 +18,9 @@ from django.views.generic.base import View
 from wagtail.actions.publish_page_revision import PublishPageRevisionAction
 from wagtail.admin import messages
 from wagtail.admin.action_menu import PageActionMenu
-from wagtail.admin.forms.comments import can_user_be_mentioned_for_page
 from wagtail.admin.mail import send_notification
 from wagtail.admin.models import EditingSession
 from wagtail.admin.telepath import JSContext
-from wagtail.admin.templatetags.wagtailadmin_tags import user_display_name
 from wagtail.admin.ui.autosave import AutosaveIndicator
 from wagtail.admin.ui.components import MediaContainer
 from wagtail.admin.ui.editing_sessions import EditingSessionsModule
@@ -50,51 +48,6 @@ from wagtail.models import (
     get_default_page_content_type,
 )
 from wagtail.utils.timestamps import render_timestamp
-
-
-class CommentMentionSuggestionsView(View):
-    def dispatch(self, request, page_id, **kwargs):
-        self.page = get_object_or_404(Page, id=page_id).specific
-        if not self.page.permissions_for_user(request.user).can_edit():
-            raise PermissionDenied
-        return super().dispatch(request, page_id, **kwargs)
-
-    def get(self, request, page_id):
-        query = request.GET.get("q", "").strip()
-        if not query:
-            return JsonResponse({"results": []})
-
-        user_model = get_user_model()
-        user_fields = {field.name for field in user_model._meta.get_fields()}
-        search_fields = {"email", "first_name", "last_name", user_model.USERNAME_FIELD}
-        search_filter = Q()
-        for field_name in search_fields & user_fields:
-            search_filter |= Q(**{f"{field_name}__icontains": query})
-
-        results = []
-        users = (
-            user_model.objects.filter(search_filter, is_active=True)
-            .select_related("wagtail_userprofile")
-            .order_by("email", user_model._meta.pk.name)
-        )
-        for user in users:
-            if not can_user_be_mentioned_for_page(self.page, user):
-                continue
-
-            results.append(
-                {
-                    "id": str(user.pk),
-                    "name": user_display_name(user),
-                    "email": user.email,
-                    "url": reverse(
-                        "wagtailusers_users:edit", args=[quote(str(user.pk))]
-                    ),
-                }
-            )
-            if len(results) == 10:
-                break
-
-        return JsonResponse({"results": results})
 
 
 class EditView(

@@ -109,4 +109,6 @@ class MentionedMessageFormMixin:
     def serialized_mentions(self, *, bound):
         if bound and "mentions" in getattr(self, "cleaned_data", {}):
             return list(self.cleaned_data["mentions"])
+        if bound and hasattr(self, "invalid_target_mentions"):
+            return list(self.invalid_target_mentions)
         return self._initial_mentions()

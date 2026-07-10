@@ -9,11 +9,15 @@ from wagtail.admin.views.pages.choose_parent import (
     ChooseParentView,
     GenericChooseParentView,
 )
+from wagtail.admin.views.pages.comment_mentions import (
+    CreatePageCommentMentionSuggestionsView,
+    PageCommentMentionSuggestionsView,
+)
 from wagtail.admin.views.pages.convert_alias import ConvertAliasView
 from wagtail.admin.views.pages.copy import CopyView
 from wagtail.admin.views.pages.create import AddSubpageView, CreateView
 from wagtail.admin.views.pages.delete import DeleteView
-from wagtail.admin.views.pages.edit import CommentMentionSuggestionsView, EditView
+from wagtail.admin.views.pages.edit import EditView
 from wagtail.admin.views.pages.history import (
     PageHistoryView,
     WorkflowHistoryDetailView,
@@ -218,10 +222,18 @@ class PageViewSet(PageListingViewSet):
     The view class to use for the edit view; must be a subclass of
     ``wagtail.admin.views.pages.edit.EditView``.
     """
-    comment_mention_suggestions_view_class = CommentMentionSuggestionsView
+    comment_mention_suggestions_view_class = PageCommentMentionSuggestionsView
     """
     The view class to use for comment mention suggestions; must be a subclass of
-    ``wagtail.admin.views.pages.edit.CommentMentionSuggestionsView``.
+    ``wagtail.admin.views.pages.comment_mentions.PageCommentMentionSuggestionsView``.
+    """
+    create_comment_mention_suggestions_view_class = (
+        CreatePageCommentMentionSuggestionsView
+    )
+    """
+    The view class to use for comment mention suggestions while creating a page;
+    must be a subclass of
+    ``wagtail.admin.views.pages.comment_mentions.CreatePageCommentMentionSuggestionsView``.
     """
     history_view_class = PageHistoryView
     """
@@ -349,6 +361,7 @@ class PageViewSet(PageListingViewSet):
             "choose_parent": self.choose_parent_view,
             "collect_workflow_action_data": self.collect_workflow_action_data_view,
             "comment_mention_suggestions": self.comment_mention_suggestions_view,
+            "create_comment_mention_suggestions": self.create_comment_mention_suggestions_view,
             "confirm_workflow_cancellation": self.confirm_workflow_cancellation_view,
             "content_type_use": self.content_type_use_view,
             "content_type_use_results": self.content_type_use_results_view,
@@ -436,6 +449,10 @@ class PageViewSet(PageListingViewSet):
     @cached_property
     def comment_mention_suggestions_view(self):
         return self.construct_view(self.comment_mention_suggestions_view_class)
+
+    @cached_property
+    def create_comment_mention_suggestions_view(self):
+        return self.construct_view(self.create_comment_mention_suggestions_view_class)
 
     @cached_property
     def history_view(self):

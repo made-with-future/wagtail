@@ -5359,11 +5359,9 @@ class TestCommenting(WagtailTestUtils, TestCase):
                 "results": [
                     {
                         "id": str(mentioned_user.pk),
-                        "name": "Mention Able",
+                        "label": "@mentionable@example.com",
                         "email": "mentionable@example.com",
-                        "url": reverse(
-                            "wagtailusers_users:edit", args=[mentioned_user.pk]
-                        ),
+                        "username": mentioned_user.get_username(),
                     }
                 ]
             },

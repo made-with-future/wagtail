@@ -1,4 +1,5 @@
 import datetime
+import json
 from unittest import mock
 
 from django.contrib.auth.models import Group, Permission
@@ -3091,6 +3092,14 @@ class TestCommenting(WagtailTestUtils, TestCase):
         self.assertEqual("page-edit-form", form["id"])
         self.assertIn("w-init", form["data-controller"])
         self.assertEqual("w-comments:init", form["data-w-init-event-value"])
+        comments_data = json.loads(soup.select_one("#comments-data").string)
+        self.assertEqual(
+            comments_data["mention_suggestions_url"],
+            reverse(
+                "wagtailadmin_pages:create_comment_mention_suggestions",
+                args=["tests", "simplepage", self.root_page.pk],
+            ),
+        )
 
     @override_settings(WAGTAILADMIN_COMMENTS_ENABLED=False)
     def test_comments_disabled(self):

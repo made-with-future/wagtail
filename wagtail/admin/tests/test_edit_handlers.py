@@ -8,7 +8,7 @@ from unittest import mock
 from django import forms
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.contrib.auth.models import AnonymousUser, Permission
+from django.contrib.auth.models import AnonymousUser, Group, Permission
 from django.core import checks
 from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
 from django.test import RequestFactory, TestCase, override_settings
@@ -16,6 +16,10 @@ from django.urls import reverse
 from django.utils.html import escape, json_script
 from freezegun import freeze_time
 
+from wagtail.admin.comment_mentions import (
+    normalize_mention_label,
+    resolve_new_mention_users,
+)
 from wagtail.admin.forms import WagtailAdminModelForm, WagtailAdminPageForm
 from wagtail.admin.panels import (
     CommentPanel,
@@ -50,6 +54,7 @@ from wagtail.models import (
     CommentMention,
     CommentReply,
     CommentReplyMention,
+    GroupPagePermission,
     Page,
     Site,
 )
@@ -1773,7 +1778,19 @@ class TestCommentPanel(WagtailTestUtils, TestCase):
         self.mention_target = self.create_user(
             "task-4-mention-target", email="mention-target@example.com"
         )
-        self.mention_label = "@target"
+        mention_group = Group.objects.create(name="Task 5 mention candidates")
+        mention_group.permissions.add(
+            Permission.objects.get(
+                content_type__app_label="wagtailadmin", codename="access_admin"
+            )
+        )
+        mention_group.user_set.add(self.mention_target)
+        GroupPagePermission.objects.create(
+            group=mention_group,
+            page=self.event_page,
+            permission_type="change",
+        )
+        self.mention_label = normalize_mention_label(self.mention_target)
         self.valid_occurrence = {
             "key": "29cc6a1f-00ed-41d7-94b1-d46a947962cb",
             "user_id": str(self.mention_target.pk),
@@ -1837,14 +1854,15 @@ class TestCommentPanel(WagtailTestUtils, TestCase):
     def repeated_occurrences(self, *, user_ids=None):
         if user_ids is None:
             user_ids = [str(self.mention_target.pk)] * 2
+        second_start = len(self.mention_label) + len(" and ")
         return [
             self.valid_occurrence | {"user_id": user_ids[0]},
             self.valid_occurrence
             | {
                 "key": "327547cc-f9ee-4bce-852f-bf96f14179b9",
                 "user_id": user_ids[1],
-                "start": 12,
-                "end": 19,
+                "start": second_start,
+                "end": second_start + len(self.mention_label),
             },
         ]
 
@@ -2198,6 +2216,13 @@ class TestCommentPanel(WagtailTestUtils, TestCase):
                 for occurrence in data["comments"][0]["mentions"]
             )
         )
+        self.assertEqual(
+            data["mention_suggestions_url"],
+            reverse(
+                "wagtailadmin_pages:comment_mention_suggestions",
+                args=[self.event_page.pk],
+            ),
+        )
 
     def test_serialization_keeps_current_editor_in_authors(self):
         self.comment.delete()
@@ -2250,7 +2275,7 @@ class TestCommentPanel(WagtailTestUtils, TestCase):
         self.store_mentions(
             self.comment,
             occurrences,
-            text="@target and @target",
+            text=f"{self.mention_label} and {self.mention_label}",
         )
         form = self.make_page_form()
         self.assertTrue(form.is_valid(), form.errors)
@@ -2273,7 +2298,7 @@ class TestCommentPanel(WagtailTestUtils, TestCase):
     def test_repeated_occurrences_remain_distinct_but_create_one_lookup(self):
         self.make_messages_editable()
         occurrences = self.repeated_occurrences()
-        text = "@target and @target"
+        text = f"{self.mention_label} and {self.mention_label}"
         form = self.make_page_form(
             comment_mentions=json.dumps(occurrences),
             reply_mentions=json.dumps(occurrences),
@@ -2419,9 +2444,152 @@ class TestCommentPanel(WagtailTestUtils, TestCase):
             ).exists()
         )
 
+    def test_new_comment_and_reply_mentions_are_resolved_in_one_call(self):
+        self.make_messages_editable()
+        payload = json.dumps([self.valid_occurrence])
+
+        with mock.patch(
+            "wagtail.admin.forms.comments.resolve_new_mention_users",
+            wraps=resolve_new_mention_users,
+        ) as resolve:
+            form = self.make_page_form(
+                comment_mentions=payload,
+                reply_mentions=payload,
+                data_overrides={
+                    "comments-0-text": self.mention_label,
+                    "comments-0-replies-0-text": self.mention_label,
+                },
+            )
+            self.assertTrue(form.is_valid(), form.errors)
+
+        resolve.assert_called_once()
+
+    def test_forged_new_label_errors_only_the_exact_mentions_field(self):
+        self.make_messages_editable()
+        forged_label = "@forged@example.com"
+        occurrence = self.valid_occurrence | {
+            "end": len(forged_label),
+            "label": forged_label,
+        }
+        payload = json.dumps([occurrence])
+
+        form = self.make_page_form(
+            comment_mentions=payload,
+            data_overrides={"comments-0-text": forged_label},
+        )
+
+        self.assertFalse(form.is_valid())
+        comments = form.formsets["comments"]
+        comment_form = comments.forms[0]
+        self.assertEqual(
+            comment_form.errors["mentions"], ["Enter a valid mention list."]
+        )
+        self.assertEqual(comments.non_form_errors(), [])
+        self.assertEqual(comment_form["mentions"].value(), payload)
+        self.assertEqual(
+            form.serialize_comments(self.commenting_user)["comments"][0]["mentions"],
+            [occurrence],
+        )
+
+    def test_duplicate_keys_across_messages_only_error_the_invalid_occurrence(self):
+        self.make_messages_editable()
+        ineligible = self.create_user(
+            "ineligible-mention-target", email="ineligible@example.com"
+        )
+        ineligible_label = normalize_mention_label(ineligible)
+        invalid_occurrence = self.valid_occurrence | {
+            "user_id": str(ineligible.pk),
+            "end": len(ineligible_label),
+            "label": ineligible_label,
+        }
+
+        form = self.make_page_form(
+            comment_mentions=json.dumps([invalid_occurrence]),
+            reply_mentions=json.dumps([self.valid_occurrence]),
+            data_overrides={
+                "comments-0-text": ineligible_label,
+                "comments-0-replies-0-text": self.mention_label,
+            },
+        )
+
+        self.assertFalse(form.is_valid())
+        comments = form.formsets["comments"]
+        comment_form = comments.forms[0]
+        reply_form = comment_form.formsets["replies"].forms[0]
+        self.assertEqual(
+            comment_form.errors["mentions"], ["Enter a valid mention list."]
+        )
+        self.assertNotIn("mentions", reply_form.errors)
+        self.assertEqual(comments.non_form_errors(), [])
+        self.assertEqual(comment_form.formsets["replies"].non_form_errors(), [])
+
+    def test_reply_candidate_validation_isolated_from_a_sibling_field_error(self):
+        self.make_messages_editable()
+        ineligible = self.create_user(
+            "sibling-ineligible-target", email="sibling-ineligible@example.com"
+        )
+        label = normalize_mention_label(ineligible)
+        occurrence = self.valid_occurrence | {
+            "user_id": str(ineligible.pk),
+            "end": len(label),
+            "label": label,
+        }
+
+        form = self.make_page_form(
+            reply_mentions=json.dumps([occurrence]),
+            data_overrides={
+                "comments-0-replies-0-text": label,
+                "comments-0-replies-1-text": "",
+            },
+        )
+
+        self.assertFalse(form.is_valid())
+        replies = form.formsets["comments"].forms[0].formsets["replies"].forms
+        self.assertEqual(replies[0].errors["mentions"], ["Enter a valid mention list."])
+        self.assertIn("text", replies[1].errors)
+
+    def test_new_occurrence_resolves_the_configured_prepared_primary_key(self):
+        self.make_messages_editable()
+        pk_field = get_user_model()._meta.pk
+        prepared_id = str(pk_field.get_prep_value(self.mention_target.pk))
+        occurrence = self.valid_occurrence | {"user_id": prepared_id}
+
+        form = self.make_page_form(
+            comment_mentions=json.dumps([occurrence]),
+            data_overrides={"comments-0-text": self.mention_label},
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(
+            form.formsets["comments"].forms[0].mention_changes.added,
+            (occurrence,),
+        )
+
+    def test_deleted_message_does_not_reauthorize_its_new_occurrences(self):
+        self.make_messages_editable()
+        ineligible = self.create_user(
+            "deleted-ineligible-target", email="deleted-ineligible@example.com"
+        )
+        label = normalize_mention_label(ineligible)
+        occurrence = self.valid_occurrence | {
+            "user_id": str(ineligible.pk),
+            "end": len(label),
+            "label": label,
+        }
+
+        form = self.make_page_form(
+            comment_mentions=json.dumps([occurrence]),
+            data_overrides={
+                "comments-0-text": label,
+                "comments-0-DELETE": "1",
+            },
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+
     def test_serialization_uses_two_bulk_user_queries(self):
         occurrences = self.repeated_occurrences()
-        text = "@target and @target"
+        text = f"{self.mention_label} and {self.mention_label}"
         self.store_mentions(self.comment, occurrences, text=text)
         self.store_mentions(self.reply_1, occurrences, text=text)
         other_comment = Comment.objects.create(

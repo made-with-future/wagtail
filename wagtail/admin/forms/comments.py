@@ -8,21 +8,17 @@ from modelcluster.forms import BaseChildFormSet
 from modelcluster.models import get_serializable_data_for_fields
 
 from wagtail.admin.comment_mentions import (
+    InvalidMentionTargets,
     current_mention_email,
+    future_page_mention_candidates,
+    page_mention_candidates,
+    resolve_new_mention_users,
     sync_message_mention_lookups,
 )
 from wagtail.admin.templatetags.wagtailadmin_tags import avatar_url, user_display_name
 
 from .comment_mentions import CommentMentionsField, MentionedMessageFormMixin
 from .models import WagtailAdminModelForm
-
-
-def can_user_be_mentioned_for_page(page, user):
-    return (
-        user.is_active
-        and user.has_perm("wagtailadmin.access_admin")
-        and page.permissions_for_user(user).can_edit()
-    )
 
 
 class CommentReplyForm(MentionedMessageFormMixin, WagtailAdminModelForm):
@@ -159,6 +155,71 @@ class CommentFormSet(BaseChildFormSet):
         kwargs["page"] = self.instance
         return kwargs
 
+    def clean(self):
+        super().clean()
+        if not any(
+            form.mention_changes.added
+            for form in self.iter_mention_forms(valid_only=True)
+        ):
+            return
+        if self.instance.pk:
+            candidates = page_mention_candidates(self.instance)
+        else:
+            candidates = future_page_mention_candidates(
+                parent_page=self.parent_page,
+                owner=self.for_user,
+            )
+
+        try:
+            self.validate_new_mentions(candidates)
+        except InvalidMentionTargets:
+            pass
+
+    def iter_mention_forms(self, *, include_deleted=False, valid_only=False):
+        for comment_form in self.forms:
+            comment_deleted = comment_form.cleaned_data.get("DELETE", False)
+            if (include_deleted or not comment_deleted) and (
+                not valid_only or not comment_form.errors
+            ):
+                yield comment_form
+
+            if comment_deleted and not include_deleted:
+                continue
+            replies = comment_form.formsets.get("replies")
+            if replies is None:
+                continue
+            for reply_form in replies.forms:
+                reply_deleted = reply_form.cleaned_data.get("DELETE", False)
+                if (include_deleted or not reply_deleted) and (
+                    not valid_only or not reply_form.errors
+                ):
+                    yield reply_form
+
+    def validate_new_mentions(self, candidates):
+        occurrence_forms = [
+            (form, occurrence)
+            for form in self.iter_mention_forms(valid_only=True)
+            for occurrence in form.mention_changes.added
+        ]
+        if not occurrence_forms:
+            return ()
+
+        try:
+            return resolve_new_mention_users(
+                [occurrence for form, occurrence in occurrence_forms],
+                candidates,
+            )
+        except InvalidMentionTargets as error:
+            invalid_forms = []
+            for index in error.invalid_indices:
+                form = occurrence_forms[index][0]
+                if form not in invalid_forms:
+                    invalid_forms.append(form)
+            for form in invalid_forms:
+                form.invalid_target_mentions = list(form.cleaned_data["mentions"])
+                form.add_error("mentions", form.mention_validation_error)
+            raise
+
     def sync_mention_lookups(self):
         deleted_comment_forms = set(self.deleted_forms)
         for form in self.forms:
@@ -233,5 +294,14 @@ class CommentFormSet(BaseChildFormSet):
             comments_data["mention_suggestions_url"] = reverse(
                 "wagtailadmin_pages:comment_mention_suggestions",
                 args=[self.instance.pk],
+            )
+        elif self.parent_page is not None:
+            comments_data["mention_suggestions_url"] = reverse(
+                "wagtailadmin_pages:create_comment_mention_suggestions",
+                args=[
+                    self.instance._meta.app_label,
+                    self.instance._meta.model_name,
+                    self.parent_page.pk,
+                ],
             )
         return comments_data
