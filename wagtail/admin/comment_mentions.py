@@ -1,7 +1,7 @@
+import json
 import logging
 import re
 import uuid
-from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Sequence, TypedDict
 
@@ -75,11 +75,23 @@ def normalize_mention_label(user) -> str:
     return truncate_utf16(f"@{identity}", MAX_MENTION_LABEL_UTF16)
 
 
+def _validate_mention_json_size(value: object) -> None:
+    try:
+        compact_value = json.dumps(
+            value, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    except (RecursionError, TypeError, UnicodeEncodeError, ValueError) as error:
+        raise ValidationError(_INVALID_MENTIONS_MESSAGE) from error
+    if len(compact_value) > MAX_MENTION_JSON_BYTES:
+        raise ValidationError(_INVALID_MENTIONS_MESSAGE)
+
+
 def validate_mention_occurrences(
     value: object, *, text: str
 ) -> tuple[MentionOccurrence, ...]:
     if not isinstance(value, list) or len(value) > MAX_MENTIONS:
         raise ValidationError(_INVALID_MENTIONS_MESSAGE)
+    _validate_mention_json_size(value)
     if not isinstance(text, str):
         raise ValidationError(_INVALID_MENTIONS_MESSAGE)
 
@@ -104,14 +116,7 @@ def validate_mention_occurrences(
         keys.add(key)
 
         user_id_value = occurrence["user_id"]
-        if (
-            user_id_value is None
-            or isinstance(user_id_value, bool)
-            or (
-                isinstance(user_id_value, Collection)
-                and not isinstance(user_id_value, str)
-            )
-        ):
+        if isinstance(user_id_value, bool) or not isinstance(user_id_value, (int, str)):
             raise ValidationError(_INVALID_MENTIONS_MESSAGE)
         try:
             parsed_user_id = user_pk_field.to_python(user_id_value)
@@ -156,6 +161,7 @@ def validate_mention_occurrences(
             }
         )
 
+    _validate_mention_json_size(canonical)
     ordered = sorted(
         canonical, key=lambda item: (item["start"], item["end"], item["key"])
     )
@@ -212,6 +218,13 @@ def sanitize_stored_mentions(
     value: object, *, text: str, message_id: object
 ) -> tuple[MentionOccurrence, ...]:
     if not isinstance(value, list):
+        logger.warning(
+            "Ignoring invalid stored comment mention for message %s.", message_id
+        )
+        return ()
+    try:
+        _validate_mention_json_size(value)
+    except ValidationError:
         logger.warning(
             "Ignoring invalid stored comment mention for message %s.", message_id
         )

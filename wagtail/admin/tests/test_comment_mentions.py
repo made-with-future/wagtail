@@ -1,8 +1,11 @@
+import json
+
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase
 
 from wagtail.admin.comment_mentions import (
+    MAX_MENTION_JSON_BYTES,
     MAX_MENTION_LABEL_UTF16,
     compare_mentions,
     current_mention_email,
@@ -30,6 +33,20 @@ def mention_occurrence(**overrides):
     }
     occurrence.update(overrides)
     return occurrence
+
+
+def oversized_mention_list():
+    text = " ".join(["@Jo"] * 20)
+    value = [
+        mention_occurrence(
+            key=f"00000000-0000-0000-0000-{index + 1:012x}",
+            user_id="1" * 900,
+            start=index * 4,
+            end=index * 4 + 3,
+        )
+        for index in range(20)
+    ]
+    return value, text
 
 
 class TestUTF16Helpers(SimpleTestCase):
@@ -118,6 +135,14 @@ class TestMentionOccurrenceValidation(TestCase):
         self.assertEqual(numeric[0]["user_id"], string[0]["user_id"])
         self.assertIsInstance(numeric[0]["user_id"], str)
 
+    def test_user_id_rejects_floating_point_values(self):
+        for user_id in (1.0, 1.5):
+            with self.subTest(user_id=user_id):
+                with self.assertRaises(ValidationError):
+                    validate_mention_occurrences(
+                        [mention_occurrence(user_id=user_id)], text="@Jo"
+                    )
+
     def test_offsets_must_be_non_boolean_integers(self):
         for field in ("start", "end"):
             for value in (True, 1.5, "1"):
@@ -171,6 +196,17 @@ class TestMentionOccurrenceValidation(TestCase):
         with self.assertRaises(ValidationError):
             validate_mention_occurrences([{}] * 21, text="")
 
+    def test_compact_json_size_is_limited(self):
+        value, text = oversized_mention_list()
+        self.assertEqual(len(value), 20)
+        compact_size = len(
+            json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+        self.assertGreater(compact_size, MAX_MENTION_JSON_BYTES)
+
+        with self.assertRaises(ValidationError):
+            validate_mention_occurrences(value, text=text)
+
     def test_label_length_is_limited_in_utf16_units(self):
         label = "@" + "a" * 255
 
@@ -210,6 +246,19 @@ class TestStoredMentionHandling(SimpleTestCase):
         self.assertNotIn(text, log_output.output[0])
         self.assertNotIn("private-payload", log_output.output[0])
         self.assertNotIn("do not log this", log_output.output[0])
+
+    def test_oversized_stored_list_is_omitted_without_logging_content(self):
+        value, text = oversized_mention_list()
+
+        with self.assertLogs(
+            "wagtail.admin.comment_mentions", level="WARNING"
+        ) as log_output:
+            result = sanitize_stored_mentions(value, text=text, message_id=988)
+
+        self.assertEqual(result, ())
+        self.assertEqual(len(log_output.output), 1)
+        self.assertIn("988", log_output.output[0])
+        self.assertNotIn(value[0]["user_id"], log_output.output[0])
 
     def test_retained_occurrences_cannot_change_target_or_label(self):
         initial = [mention_occurrence()]
