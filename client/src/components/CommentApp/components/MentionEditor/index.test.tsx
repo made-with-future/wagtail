@@ -130,6 +130,7 @@ test('renders one accessible multiline contenteditable and explicitly disables r
     inlineStyles: [],
     controls: [],
   });
+  expect(draftail(wrapper).prop('ariaExpanded')).toBeNull();
   const entityTypes = draftail(wrapper).prop('entityTypes') as Array<{
     source: React.ComponentType;
   }>;
@@ -431,7 +432,7 @@ test.each(['loading', 'empty', 'error'] as const)(
   },
 );
 
-test('keeps localized ready results and active-option ARIA aligned', () => {
+test('names localized ready results and keeps active-option ARIA aligned', () => {
   const gettext = jest.fn((message: string) => `Translated: ${message}`);
   (window as any).django = { gettext };
   useSuggestionsMock.mockReturnValue(
@@ -445,6 +446,11 @@ test('keeps localized ready results and active-option ARIA aligned', () => {
   );
 
   const options = wrapper.find('[role="option"]');
+  const listbox = wrapper.getDOMNode().querySelector('[role="listbox"]');
+  expect(listbox?.getAttribute('aria-label')).toBe(
+    'Translated: Mention suggestions',
+  );
+  expect(gettext).toHaveBeenCalledWith('Mention suggestions');
   expect(options).toHaveLength(2);
   expect(options.at(0).text()).toBe('@Adaada@example.com');
   expect(options.at(0).prop('aria-selected')).toBe(true);

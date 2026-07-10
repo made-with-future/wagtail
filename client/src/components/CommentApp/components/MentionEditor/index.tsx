@@ -305,7 +305,6 @@ export default function MentionEditor({
           onChange={updateEditorState}
           ariaLabel={label}
           ariaDescribedBy={ariaDescribedBy || null}
-          ariaExpanded={listboxOpen}
           placeholder={placeholder || null}
           enableHorizontalRule={false}
           enableLineBreak={false}
@@ -344,6 +343,7 @@ export default function MentionEditor({
         )}
         {listboxOpen ? (
           <ul
+            aria-label={gettext('Mention suggestions')}
             className="comment__mention-suggestions"
             id={listboxId}
             role="listbox"
