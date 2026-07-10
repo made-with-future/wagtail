@@ -2144,13 +2144,13 @@ const insertedText = `${selectedText} `;
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-const expectedOccurrence = {
+const occurrenceForUser = (userId) => ({
   key: expect.stringMatching(uuidPattern),
-  user_id: '1',
+  user_id: userId,
   start: 32,
   end: 50,
   label: '@admin@example.com',
-};
+});
 ```
 
 - [ ] **Step 1: Make the settings-UI database name configurable**
@@ -2172,12 +2172,12 @@ Use `/admin/pages/add/demosite/standardpage/2/` and a 120-second test timeout. T
 1. Disable create autosave by setting `data-w-autosave-active-value="false"` before changing the title or comments.
 2. Fill a unique required title, await its slug, open the first comment editor, type the first line, press Enter through `page.keyboard`, and type the second line up to but not including `@adm` through the browser.
 3. Assert there is one contenteditable and no textarea, Draftail toolbar, formatting control, or rich-text widget.
-4. Before typing `@adm`, register a one-shot route whose handler captures the request, awaits `route.fetch()`, then waits on a resolver before calling `route.fulfill({ response })`. Type `@adm`, await the handler reaching that hold point, assert loading and run loading Axe, then release the resolver. Assert the create suggestion endpoint URL.
-5. Select `admin` by keyboard and assert `insertedText`, inline `.comment__mention`, `data-mention-user-id="1"`, `data-mention-email="admin@example.com"`, and the exact five-field hidden object above without numeric coercion. Capture its generated key. Prove one undo returns `queryText` with `[]` and one redo restores `insertedText` with the same key. Press Backspace once to remove only the unlinked trailing space, then use `selectedText` as the persisted baseline.
+4. Before typing `@adm`, register a one-shot route whose handler captures the request, awaits `route.fetch()`, parses the real response, then waits on a resolver before calling `route.fulfill({ response })`. Type `@adm`, await the handler reaching that hold point, assert loading and run loading Axe, then release the resolver. Assert the create suggestion endpoint URL. Locate the returned `admin` result, assert its `id` is a nonempty string, assign it to `capturedUserId`, and use that exact opaque value for every subsequent browser assertion; do not assume an AutoField value or coerce it to a number.
+5. Select `admin` by keyboard and assert `insertedText`, inline `.comment__mention`, `data-mention-user-id` equal to the captured suggestion ID, `data-mention-email="admin@example.com"`, and the exact five-field object from `occurrenceForUser(capturedUserId)`. Capture its generated key. Prove one undo returns `queryText` with `[]` and one redo restores `insertedText`, the same key, and the complete occurrence containing `capturedUserId`. Press Backspace once to remove only the unlinked trailing space, then use `selectedText` as the persisted baseline.
 6. Run Axe in four distinct states: loading, ready/open with options, empty/open against a guaranteed no-match query, and closed.
 7. Install the create-response, `w-autosave:hydrate`, and `w-autosave:success` waiters first. On `#page-edit-form`, set `data-w-autosave-active-value="true"` and dispatch `new CustomEvent('w-unsaved:add', { bubbles: true, detail: { type: 'edits' } })` only after the exact hidden occurrence exists.
-8. Capture the create POST JSON, await hydration and success, resolve `response.url` against `TEST_ORIGIN`, then assert `form.action` and `page.url()` equal that absolute edit URL and that the resolved `hydrate_url` was requested. Assert the create and post-hydration edit suggestion endpoint URLs.
-9. Reload/follow the edit URL and assert exact text, entity attributes, key, opaque ID, offsets, label, and complete hidden JSON survive.
+8. Capture the create POST JSON and assert it contains the exact five-field occurrence with the generated key and `capturedUserId`; await hydration and success, then assert the post-hydration DOM and hidden JSON retain that same complete occurrence. Resolve `response.url` against `TEST_ORIGIN`, then assert `form.action` and `page.url()` equal that absolute edit URL and that the resolved `hydrate_url` was requested. Assert the create and post-hydration edit suggestion endpoint URLs.
+9. Reload/follow the edit URL and assert exact text, entity attributes, key, `capturedUserId`, offsets, label, and complete hidden JSON survive.
 10. Restore `selectedText` and the captured occurrence before each destructive case. Inserting one ASCII character before the mention retains the key and changes offsets to 33/51; inserting after it retains the key and offsets 32/50. Partial replacement leaves the exact resulting plain text with `[]`; one undo restores the original text/entity/key and one redo removes it again. Whole replacement leaves its exact replacement text with `[]`. Assert complete hidden JSON after every operation.
 11. Perform rich paste through a granted browser clipboard and `ControlOrMeta+V`, not a synthetic `ClipboardEvent`; assert exact plain text, no formatting DOM, and complete hidden JSON. Prove Ctrl/Cmd+B/I/U do not introduce formatting.
 12. Restore `selectedText` and its captured exact occurrence between every destructive case.
