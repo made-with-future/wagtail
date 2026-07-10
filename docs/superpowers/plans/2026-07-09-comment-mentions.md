@@ -21,7 +21,7 @@
 - Omitted mention fields preserve stored metadata; an explicit `[]` clears it; unchanged other-author forms remain unchanged.
 - Retained occurrence keys preserve user ID and label without re-authorizing the target; new keys require current target eligibility and the exact current label.
 - `CommentMention(comment, user)` and `CommentReplyMention(reply, user)` are unique inverse indexes derived from occurrence JSON; both foreign keys use `related_name="+"`, and lookup-row changes never determine notification novelty.
-- The editor is toolbar-free Mini Draftail with only `IMMUTABLE` `MENTION` entities. It persists neither raw Draft.js content nor rich-text formatting and never uses canvas, a textarea overlay, user-management links, or email in ordinary author records.
+- The editor is toolbar-free Mini Draftail with only `MUTABLE` `MENTION` entities and immediate full-association removal when edited entity text differs from its snapshot label. It persists neither raw Draft.js content nor rich-text formatting and never uses canvas, a textarea overlay, user-management links, or email in ordinary author records.
 - Draftail owns text and entity undo/redo together; paste is normalized to plain text, partial mention edits remove entity identity, and serialization extracts newline-flattened text plus absolute UTF-16 occurrence ranges.
 - Comment hydration returns current configured email values only in a separate `mentioned_users` map; live metadata never rewrites snapshot labels or dirties a form.
 - Notification reasons are merged per recipient after all changed messages are collected; the actor is excluded and the existing updated-comments preference remains authoritative.
@@ -1587,12 +1587,12 @@ git commit -m "Persist mentions across page comment lifecycles"
 - Create: `client/src/components/CommentApp/utils/mentions.test.ts`
 
 **Interfaces:**
-- Consumes: backend wire schema.
-- Produces: `MentionOccurrence`, `SerializedMentionOccurrence`, `MentionSuggestion`, `MentionedUser`, `MentionQuery`, canonical conversion, query recognition, and display segmentation helpers.
+- Consumes: the backend five-field occurrence wire schema from Tasks 2-8.
+- Produces: canonical occurrence conversion, query recognition, and all-or-nothing display segmentation for Tasks 11-13.
 
-- [ ] **Step 1: Write the failing pure helper suite**
+- [ ] **Step 1: Write the failing helper suite and freeze the public types**
 
-Define and test these exact interfaces:
+Define tests against these exact exports:
 
 ```typescript
 export interface SerializedMentionOccurrence {
@@ -1627,26 +1627,12 @@ export interface MentionQuery {
   end: number;
   query: string;
 }
-```
 
-Test: beginning/punctuation boundaries; no trigger inside `person@example.com`; email query with a second `@`; Unicode letters; whitespace/newline/unsupported punctuation termination; 1/64/65 UTF-16 units; collapsed selection only; duplicate labels/users; repeated occurrences; emoji and multiline offsets; malformed display ranges falling back to plain text; deterministic sort; snake/camel round-trip; and `MentionedUser.email` remaining separate from occurrence identity and labels.
+export interface MentionTextPart {
+  text: string;
+  mention?: MentionOccurrence;
+}
 
-- [ ] **Step 2: Run and verify the helper module is absent**
-
-Run:
-
-```bash
-npm run test:unit -- --runInBand \
-  client/src/components/CommentApp/utils/mentions.test.ts
-```
-
-Expected: FAIL because `utils/mentions.ts` does not exist.
-
-- [ ] **Step 3: Implement pure helpers**
-
-Export:
-
-```typescript
 export function deserializeMentionOccurrences(
   values: readonly SerializedMentionOccurrence[],
 ): MentionOccurrence[];
@@ -1667,155 +1653,127 @@ export function splitTextByMentions(
 ): MentionTextPart[];
 ```
 
-Use JavaScript string lengths directly for UTF-16 units. Conversion sorts already-valid occurrences by `(start, end, key)` without attaching live metadata. Display segmentation validates monotonic ranges and exact label slices defensively; malformed input renders the complete value as plain text. Never infer identity from label or email text.
+Cover snake/camel round trips, deterministic `(start, end, key)` sorting, duplicate labels/users, repeated occurrences, emoji and multiline offsets, and `MentionedUser.email` remaining separate from saved identity/label data.
 
-- [ ] **Step 4: Verify pure helpers, lint, and typecheck**
+For `splitTextByMentions`, cover integer and in-bounds checks, monotonic sorted non-overlap, negative/clamped ranges, ranges that split a UTF-16 surrogate pair, exact label slices, overlap/order failures, and valid-then-invalid input. One invalid occurrence must return exactly `[{ text: value }]`; it must not render the valid prefix as a mention.
+
+For `findMentionQuery`, cover a collapsed caret at the beginning and in the middle of text, every accepted punctuation character (`_`, `.`, `+`, `-`, `'`, and a second `@`), Unicode letters/numbers, an ordinary `person@example.com` non-trigger, whitespace/newline/unsupported punctuation termination, a bare `@`, and exact 1/64/65 UTF-16-unit boundaries including astral characters.
+
+- [ ] **Step 2: Run the helper suite and verify RED**
 
 Run:
 
 ```bash
-npm run test:unit -- --runInBand \
-  client/src/components/CommentApp/utils/mentions.test.ts
-./node_modules/.bin/eslint --report-unused-disable-directives \
-  client/src/components/CommentApp/utils/mentions.ts \
-  client/src/components/CommentApp/utils/mentions.test.ts
+npm run test:unit -- --runInBand client/src/components/CommentApp/utils/mentions.test.ts
+```
+
+Expected: FAIL because `client/src/components/CommentApp/utils/mentions.ts` does not exist.
+
+- [ ] **Step 3: Implement the pure helpers**
+
+Use JavaScript string offsets directly as UTF-16 units. Query recognition uses the maximal accepted token run ending at the collapsed caret, requires the trigger `@` to be at the start or preceded by a non-token character, and accepts 1-64 UTF-16 units after the trigger. Sorting may normalize only already-valid occurrences; it must not repair malformed input. Display segmentation validates the complete list before producing any mention part. Never infer identity from label or email text.
+
+- [ ] **Step 4: Run focused tests, lint, formatting, and type checking**
+
+Run:
+
+```bash
+npm run test:unit -- --runInBand client/src/components/CommentApp/utils/mentions.test.ts
+./node_modules/.bin/eslint --report-unused-disable-directives client/src/components/CommentApp/utils/mentions.ts client/src/components/CommentApp/utils/mentions.test.ts
+./node_modules/.bin/prettier --check client/src/components/CommentApp/utils/mentions.ts client/src/components/CommentApp/utils/mentions.test.ts
 npm run lint:ts
 ```
 
-Expected: all PASS.
+Expected: all commands PASS.
 
-- [ ] **Step 5: Commit pure client behavior**
+- [ ] **Step 5: Commit the helper contract**
 
 ```bash
 git add client/src/components/CommentApp/utils/mentions.ts client/src/components/CommentApp/utils/mentions.test.ts
 git commit -m "Add client-side mention wire helpers"
 ```
 
+Expected: the commit contains only the two Task 9 files.
+
 ---
 
-### Task 10: Comment/Reply State, Hydration, Dirty Checks, and Hidden Forms
+### Task 10: Server Rejection Serialization for Comments and Replies
 
 **Files:**
 - Modify: `wagtail/admin/forms/comments.py`
+- Modify: `wagtail/admin/views/pages/create.py`
+- Modify: `wagtail/admin/views/pages/edit.py`
 - Modify: `wagtail/admin/tests/test_edit_handlers.py`
-- Modify: `client/src/components/CommentApp/state/comments.ts`
-- Modify: `client/src/components/CommentApp/state/comments.test.ts`
-- Modify: `client/src/components/CommentApp/state/settings.ts`
-- Modify: `client/src/components/CommentApp/selectors/index.ts`
-- Modify: `client/src/components/CommentApp/selectors/selectors.test.ts`
-- Modify: `client/src/components/CommentApp/__fixtures__/state.tsx`
-- Modify: `client/src/components/CommentApp/components/Form/index.tsx`
-- Modify: `client/src/components/CommentApp/components/Form/index.test.tsx`
-- Modify: `client/src/components/CommentApp/main.tsx`
-- Create: `client/src/components/CommentApp/main.test.tsx`
+- Modify: `wagtail/admin/tests/pages/test_create_page.py`
+- Modify: `wagtail/admin/tests/pages/test_edit_page.py`
 
 **Interfaces:**
-- Consumes: Task 9 internal/wire types.
-- Produces: full occurrence state for comments, existing replies, and new replies; a separate current-email map in global settings; complete hidden JSON; autosave-safe hydration.
+- Consumes: Task 8's atomic comment/reply form validation and existing comment serializer.
+- Produces: optional bound `comments` data on invalid create/edit JSON responses for Task 12's rejection-only hydration path.
+- Does not change frontend state or consume Task 9 types.
 
-- [ ] **Step 1: Write failing state/form/hydration tests**
+The invalid JSON response contract is:
 
-Assert all three state copies for both message types:
-
-```typescript
-expect(reply).toMatchObject({
-  mentions: [mention],
-  originalMentions: [mention],
-  newMentions: [],
-});
+```text
+{
+  success: false,
+  error_code: string,
+  error_message: string,
+  comments?: CommentAppData
+}
 ```
 
-Dirty-state cases: add/remove/move/label/key/user changes; exact revert to original; comment and reply independently; a creating unsaved comment remains excluded until committed.
+`comments` carries exact generic `mention_error` values on the affected comment/reply and `pk: null` for rejected unsaved messages. It is present only when bound comments were serialized safely.
 
-Assert exact hidden values:
+- [ ] **Step 1: Write failing form/create/edit response tests**
 
-```typescript
-expect(
-  wrapper.find('input[name="comments-0-replies-0-mentions"]').prop('value'),
-).toBe(JSON.stringify([{ key, user_id, start, end, label }]));
-```
+Add comment and reply parity for:
 
-Hydration tests must load serialized comment/reply occurrences and `mentioned_users`, update both via autosave, preserve canonical occurrence values, replace current emails without changing text/labels or dirty state, clear working values, omit deleted-user metadata cleanly, and never require author email/URL data. A bound server rejection must serialize only the generic `mentions` error onto the exact comment or reply, retain the submitted occurrence list, and hydrate that error into the matching client state without exposing target details.
+- a structurally valid occurrence rejected only because its target disappeared or lost permission: retain the submitted text and occurrence list as bound working data and attach only the generic `mentions` error;
+- malformed JSON, blank/oversized input, parser/digit-limit/recursion failure, or an invalid occurrence shape: serialize sanitized initial values and never echo the raw payload;
+- an existing bound message: retain its real numeric PK;
+- a rejected unsaved comment/reply: serialize `pk: null`;
+- sibling messages: serialize independent errors and values with no target identifier or permission detail leakage;
+- create and edit Accept-JSON validation failures: include top-level `comments` without changing the existing error fields; and
+- failures with no safely serialized bound comments: omit `comments`.
 
-- [ ] **Step 2: Run focused tests and verify failures**
+- [ ] **Step 2: Run the server modules and verify RED**
 
 Run:
 
 ```bash
-npm run test:unit -- --runInBand \
-  client/src/components/CommentApp/state/comments.test.ts \
-  client/src/components/CommentApp/selectors/selectors.test.ts \
-  client/src/components/CommentApp/components/Form/index.test.tsx \
-  client/src/components/CommentApp/main.test.tsx
+python runtests.py -- wagtail.admin.tests.test_edit_handlers wagtail.admin.tests.pages.test_create_page wagtail.admin.tests.pages.test_edit_page
 ```
 
-Expected: FAIL because replies/new replies lack occurrence state and current hydration depends on author email metadata.
+Expected: FAIL because invalid create/edit JSON responses do not yet carry the bound comment data required by the new assertions.
 
-- [ ] **Step 3: Implement atomic state fields and dirty comparison**
+- [ ] **Step 3: Implement safe bound serialization in the form path**
 
-Use `MentionOccurrence[]` for:
+Reuse the existing per-entry sanitizer and generic mention error. Preserve only structurally valid submitted occurrences rejected at target/permission validation. Structural/parser failures use sanitized model/form initial data. Keep comment and reply values/errors isolated, preserve `None` PKs, and never interpolate malformed payload content into the response.
 
-```typescript
-// Comment
-mentions;
-originalMentions;
-newMentions;
-newReplyMentions;
-mentionError?: string;
+- [ ] **Step 4: Add `comments` to invalid production JSON responses**
 
-// CommentReply
-mentions;
-originalMentions;
-newMentions;
-mentionError?: string;
-```
+Update both production create and edit views. Do not change successful response semantics. Do not add `comments` to unrelated network/hydration errors, and do not expose target IDs beyond the already sanitized occurrence wire data.
 
-Initialize arrays without sharing mutable references and initialize `mentionError` independently on comments and replies. Hydration/update loads `mention_error`; the first local text or occurrence change clears only that message's error. Dirty comparison must compare canonical serialized occurrence arrays, including key, user ID, range, and label; sorting only normalizes already-valid `(start,end,key)` order. A server error is presentation state and does not itself make the page dirty.
-
-Add to global settings without mixing it into occurrence identity:
-
-```typescript
-mentionedUsers: Record<string, MentionedUser>;
-```
-
-- [ ] **Step 4: Implement complete hidden forms and wire hydration**
-
-Add serialized `mentions` plus an optional generic `mention_error` to `InitialComment` and `InitialCommentReply`, and add the exact server key to `CommentAppData`:
-
-```typescript
-mentioned_users: Record<string, MentionedUser>;
-```
-
-Convert occurrences using Task 9 helpers. Carry `mention_error` separately from occurrence identity and clear it when the user changes that message's text or occurrence list. Always output complete lists for every participating form:
-
-```typescript
-value={JSON.stringify(serializeMentionOccurrences(comment.mentions))}
-value={JSON.stringify(serializeMentionOccurrences(reply.mentions))}
-```
-
-Restore `Author` to ID/name/avatar only. Remove `getMention` and all author email/URL state. Store current email only in `settings.mentionedUsers`; `loadData` and `updateData` must round-trip comments, replies, and that map independently. Updating only `mentioned_users` must leave `selectIsDirty` false.
-
-- [ ] **Step 5: Verify state, forms, hydration, and full types**
+- [ ] **Step 5: Verify server behavior and canonical server lint**
 
 Run:
 
 ```bash
-npm run test:unit -- --runInBand \
-  client/src/components/CommentApp/state/comments.test.ts \
-  client/src/components/CommentApp/selectors/selectors.test.ts \
-  client/src/components/CommentApp/components/Form/index.test.tsx \
-  client/src/components/CommentApp/main.test.tsx
-npm run lint:ts
+python runtests.py -- wagtail.admin.tests.test_edit_handlers wagtail.admin.tests.pages.test_create_page wagtail.admin.tests.pages.test_edit_page
+make lint-server
 ```
 
-Expected: all PASS.
+Expected: all commands PASS; valid target/permission rejections redisplay safe working values, structural failures never echo raw input, and successful JSON responses are unchanged.
 
-- [ ] **Step 6: Commit the state and wire contract**
+- [ ] **Step 6: Commit only the server transport slice**
 
 ```bash
-git add wagtail/admin/forms/comments.py wagtail/admin/tests/test_edit_handlers.py client/src/components/CommentApp/state client/src/components/CommentApp/selectors client/src/components/CommentApp/__fixtures__/state.tsx client/src/components/CommentApp/components/Form client/src/components/CommentApp/main.tsx client/src/components/CommentApp/main.test.tsx
-git commit -m "Track mentions for comments and replies"
+git add wagtail/admin/forms/comments.py wagtail/admin/views/pages/create.py wagtail/admin/views/pages/edit.py wagtail/admin/tests/test_edit_handlers.py wagtail/admin/tests/pages/test_create_page.py wagtail/admin/tests/pages/test_edit_page.py
+git commit -m "Serialize rejected comment mention state"
 ```
+
+Expected: the commit contains only the six Task 10 files and no frontend migration.
 
 ---
 
@@ -1826,12 +1784,8 @@ git commit -m "Track mentions for comments and replies"
 - Create: `client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.test.tsx`
 
 **Interfaces:**
-- Consumes: `MentionQuery` and exact `{results}` response.
-- Produces: `useMentionSuggestions` with closed/loading/ready/empty/error states and explicit close.
-
-- [ ] **Step 1: Write failing fake-timer/request-order tests**
-
-Freeze the interface:
+- Consumes: Task 9 `MentionQuery` and `MentionSuggestion` plus the exact server `{results}` response.
+- Produces: one request state machine for Task 12.
 
 ```typescript
 export type MentionSuggestionStatus =
@@ -1855,61 +1809,130 @@ export interface UseMentionSuggestionsResult {
 }
 ```
 
-Tests use fake timers and deferred fetch promises for: no URL/query; exactly 199/200 ms; clearing old results immediately; abort on changed query/close/unmount; older response resolving last; non-OK; invalid top-level/results/item shapes including missing/non-string `email`; empty list; composition suppression; close remaining closed until the query changes.
+Query identity is the complete `(start, end, query)` tuple.
 
-- [ ] **Step 2: Run and verify missing hook**
+- [ ] **Step 1: Write failing fake-timer and deferred-request tests**
+
+Create the shared editor directory before adding the hook files:
 
 ```bash
-npm run test:unit -- --runInBand \
-  client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.test.tsx
+mkdir -p client/src/components/CommentApp/components/MentionEditor
+```
+
+Cover:
+
+- missing URL/query and composition suppression;
+- exactly 199/200 ms with a 200 ms default;
+- immediate result clearing and request-generation invalidation on every effective tuple change;
+- timer cancellation and abort/invalidation on changed query, close, composition, URL/query disappearance, unmount, and any suppression transition;
+- request A settling during request B's debounce and after B is ready, for both stale success and stale non-`AbortError` rejection;
+- every terminal state update guarded by the current request generation;
+- `AbortError` remaining silent and non-OK/network failures becoming `error` only when current;
+- explicit close latching across equal rerenders and releasing when any query tuple field changes;
+- valid empty results becoming `empty`;
+- response-wide validation: top-level object, `results` array, object items, required string `id`/`label`/`email`, empty-string email allowed, optional string `username`, and one malformed/mixed item making the whole response `error`; and
+- relative URL resolution, replacement of all existing `q` values, and preservation/order of repeated non-`q` parameters.
+
+- [ ] **Step 2: Run the hook suite and verify RED**
+
+```bash
+npm run test:unit -- --runInBand client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.test.tsx
 ```
 
 Expected: FAIL because the hook does not exist.
 
-- [ ] **Step 3: Implement the state machine**
+- [ ] **Step 3: Implement the request state machine**
 
-Use a 200 ms default timer, one `AbortController` per request, and a monotonically increasing request ID checked before every state update. Resolve the supplied path against `window.location.origin`, set only its `q` search parameter from `query.query`, and preserve any existing parameters. Parse required `id`, `label`, and `email` strings plus optional `username` string. A new query sets loading and clears results before the timer; `AbortError` never sets error.
+Use one timer and `AbortController` per effective query, plus a monotonically increasing generation invalidated before any asynchronous work can settle. Resolve the supplied URL against `window.location.origin`; use `searchParams.set('q', query.query)` so every old `q` is replaced while unrelated repeated parameters survive. Validate the entire response before publishing suggestions. `close()` aborts/invalidates and latches until the tuple changes.
 
-- [ ] **Step 4: Verify the hook and commit**
+- [ ] **Step 4: Verify the hook, formatting, lint, and types**
 
 ```bash
-npm run test:unit -- --runInBand \
-  client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.test.tsx
+npm run test:unit -- --runInBand client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.test.tsx
+./node_modules/.bin/eslint --report-unused-disable-directives client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.ts client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.test.tsx
+./node_modules/.bin/prettier --check client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.ts client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.test.tsx
 npm run lint:ts
+```
+
+Expected: all commands PASS, including both stale-success and stale-error races.
+
+- [ ] **Step 5: Commit the isolated hook**
+
+```bash
 git add client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.ts client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.test.tsx
 git commit -m "Make mention suggestions race safe"
 ```
 
-Expected: tests/typecheck PASS; commit contains only the hook and tests.
+Expected: the commit contains only the hook and its test.
 
 ---
 
-### Task 12: Mini Draftail Mention Entities and Comment/Reply UI
+### Task 12: Atomic Comment State and Mini Draftail Frontend Migration
 
 **Files:**
+- Modify: `client/src/components/CommentApp/state/comments.ts`
+- Modify: `client/src/components/CommentApp/state/comments.test.ts`
+- Modify: `client/src/components/CommentApp/state/settings.ts`
+- Modify: `client/src/components/CommentApp/selectors/index.ts`
+- Modify: `client/src/components/CommentApp/selectors/selectors.test.ts`
+- Modify: `client/src/components/CommentApp/__fixtures__/state.tsx`
+- Modify: `client/src/components/CommentApp/components/Form/index.tsx`
+- Modify: `client/src/components/CommentApp/components/Form/index.test.tsx`
+- Modify: `client/src/components/CommentApp/main.tsx`
+- Create: `client/src/components/CommentApp/main.test.tsx`
+- Modify: `client/src/components/CommentApp/main.scss`
 - Create: `client/src/components/CommentApp/components/MentionEditor/draftail.ts`
 - Create: `client/src/components/CommentApp/components/MentionEditor/draftail.test.ts`
 - Create: `client/src/components/CommentApp/components/MentionEditor/index.tsx`
 - Create: `client/src/components/CommentApp/components/MentionEditor/index.test.tsx`
-- Delete: `client/src/components/CommentApp/components/MentionTextArea/index.tsx`
-- Delete: `client/src/components/CommentApp/components/MentionTextArea/index.test.tsx`
 - Create: `client/src/components/CommentApp/components/MentionText/index.tsx`
 - Create: `client/src/components/CommentApp/components/MentionText/index.test.tsx`
+- Delete: `client/src/components/CommentApp/components/MentionTextArea/index.tsx`
+- Delete: `client/src/components/CommentApp/components/MentionTextArea/index.test.tsx`
 - Delete: `client/src/components/CommentApp/components/Comment/CommentText.tsx`
 - Delete: `client/src/components/CommentApp/components/Comment/CommentText.test.tsx`
 - Modify: `client/src/components/CommentApp/components/Comment/index.tsx`
 - Create: `client/src/components/CommentApp/components/Comment/index.test.tsx`
+- Modify: `client/src/components/CommentApp/components/Comment/style.scss`
 - Modify: `client/src/components/CommentApp/components/CommentReply/index.tsx`
 - Create: `client/src/components/CommentApp/components/CommentReply/index.test.tsx`
-- Modify: `client/src/components/CommentApp/components/Comment/style.scss`
+- Modify: `client/src/entrypoints/admin/comments.js`
+- Modify: `client/src/entrypoints/admin/comments.test.js`
 
 **Interfaces:**
-- Consumes: Task 9 helpers, Task 10 state/live metadata, Task 11 hook, and the repository's existing `draftail`, `draft-js`, and `uuid` dependencies.
-- Produces: toolbar-free `MENTION` entity hydration/extraction, keyboard/pointer/IME-safe editing, and styled non-link display for comments and replies.
+- Consumes: Task 9 occurrence/query/display helpers, Task 10 optional rejected `comments` transport, Task 11 hook, and existing `draftail`, `draft-js`, and `uuid` dependencies.
+- Produces: occurrence-aware comment/reply Redux state, success and rejection hydration paths, complete hidden forms, toolbar-free Mini Draftail editing, and non-link saved mention rendering.
+- Atomic boundary: all listed state, editor, renderer, comment/reply consumer, entrypoint, and tests migrate in this one task and one commit. Do not run a full TypeScript gate against a partial legacy `Mention`/new `MentionOccurrence` mixture.
 
-- [ ] **Step 1: Write failing Draftail conversion and renderer tests**
+State uses independently owned `MentionOccurrence[]` values:
 
-Freeze the conversion contract in `MentionEditor/draftail.test.ts`:
+```typescript
+// Comment
+mentions;
+originalMentions;
+newMentions;
+newReplyMentions;
+mentionError?: string;
+
+// CommentReply
+mentions;
+originalMentions;
+newMentions;
+mentionError?: string;
+```
+
+`InitialComment.pk` and `InitialCommentReply.pk` are `number | null`. Global settings adds `mentionedUsers: Record<string, MentionedUser>` without adding email to authors or entity data.
+
+Keep successful rebasing and rejected hydration separate:
+
+```typescript
+CommentApp.updateData(data: CommentAppData): void;
+CommentApp.hydrateRejectedData(data: CommentAppData): void;
+```
+
+`updateData` remains success-only and may reset/rebase originals. `hydrateRejectedData` never rebases originals, resurrects removed entries, or marks an equal error-only response dirty.
+
+Freeze the Draft conversion contract:
 
 ```typescript
 export interface MentionEditorValue {
@@ -1938,9 +1961,7 @@ export function insertMentionSuggestion(
 ): EditorState;
 ```
 
-Test: plain and multiline hydration; emoji before an entity; multiple blocks; repeated users; duplicate labels; invalid/cross-block/mismatched occurrence fallback; absolute UTF-16 extraction; deterministic `(start,end,key)` ordering; edit before/after an entity; partial edit stripping the `MENTION` entity while retaining characters; whole selection replacement; suggestion insertion plus trailing space and injected UUID; entity/text undo and redo; cut; and plain-text paste not recreating entities.
-
-Use this component contract in `MentionEditor/index.test.tsx`:
+Freeze the component contract:
 
 ```typescript
 export interface MentionEditorProps {
@@ -1951,180 +1972,289 @@ export interface MentionEditorProps {
   mentionedUsers: Readonly<Record<string, MentionedUser>>;
   mentionSuggestionsUrl?: string;
   error?: string;
+  describedBy?: string;
+  className?: string;
+  placeholder?: string;
+  focusOnMount?: boolean;
+  focusTarget?: boolean;
   onChange(value: string, mentions: MentionOccurrence[]): void;
 }
 ```
 
-Test one Draftail `[contenteditable="true"]`, no `<textarea>`, no `.Draftail-Toolbar`, no formatting controls, `stripPastedStyles`, typing Enter/multiline text, selected-range paste, emoji offsets, query recomputation from `EditorState` selection, composition start/end, ArrowUp/Down wrap, Enter selection, Escape close, Tab closing without prevention, pointer selection without blur, loading/empty/error/ready status text, accessible name, listbox ownership, expanded state, and active-option announcement on the actual focusable editor surface. A generic bound `mentions` error must be visibly adjacent to the exact comment/reply editor, use `role="alert"`, and be connected to the focusable surface with `aria-describedby`; no target identifier or permission detail is rendered. The mention decorator renders `.comment__mention`, the saved label, `data-mention-user-id`, and separately hydrated current-email metadata without rewriting visible text. Also prove that a parent echo of the just-emitted value preserves selection/undo history, a genuinely different external value rehydrates the editor, and a metadata-only change rerenders decoration without rehydrating or dirtying content.
+**Binding entity correction:** use Draft.js `MUTABLE` `MENTION` entities plus immediate mismatch normalization. This supersedes the earlier plan/design `IMMUTABLE` mechanism wording. It is required to preserve the approved behavior where a partial edit removes identity but leaves the resulting characters as plain text.
 
-Renderer tests cover plain/multiple/repeated ranges, duplicate labels, emoji/multiline, malformed range fallback, HTML-like escaping, and `<span class="comment__mention">` with no link.
+- [ ] **Step 1: Write failing state, selector, form, hydration, and entrypoint tests**
 
-- [ ] **Step 2: Run and verify Mini Draftail support is absent**
+Cover independently copied arrays **and occurrence objects** for comments, existing replies, and new replies; dirty comparison across key/user/range/label additions, removals, moves, and exact reverts; error-only state not dirty; equal reducer updates preserving `mentionError`; and only a semantically different local text/canonical-occurrence change clearing that message's error.
 
-```bash
-npm run test:unit -- --runInBand \
-  client/src/components/CommentApp/components/MentionEditor/draftail.test.ts \
-  client/src/components/CommentApp/components/MentionEditor/index.test.tsx \
-  client/src/components/CommentApp/components/MentionText/index.test.tsx
-```
+Assert complete hidden five-field JSON for every participating comment/reply, including unchanged forms. Test `number | null` PKs, rejected unsaved messages remaining in hidden forms, cancel deleting a bound `pk: null` message, cancel restoring saved existing values, current-email metadata changes not dirtying content, deleted metadata omission, and sibling error isolation.
 
-Expected: FAIL because `MentionEditor` and its Draftail conversion module do not exist.
+Keep the public paths distinct:
 
-- [ ] **Step 3: Implement deterministic Draftail hydration and extraction**
+- success `w-autosave:success` calls `updateData(detail.data.comments)`, rebases values, clears processed removals/errors, and preserves success focus behavior;
+- `w-autosave:error` calls `hydrateRejectedData(detail.response.comments)` only when `detail.response.comments` exists;
+- errors without `comments` do not mutate CommentApp state;
+- rejected existing/unsaved messages return to editing/creating mode with valid working values while originals/removals stay unchanged.
 
-Use `ContentState.createFromText(value)` so `\n` becomes ordinary Draft blocks. For every structurally valid occurrence, map absolute UTF-16 offsets into one block, require the exact label slice, create a `MENTION` entity with Draft.js `IMMUTABLE` mutability and `{key, userId, label}`, and apply it with `Modifier.applyEntity`. Invalid or cross-block occurrences remain plain text.
+- [ ] **Step 2: Write failing Draft conversion, editor, renderer, and integration tests**
 
-Extraction joins blocks with `\n`, walks contiguous `MENTION` entity ranges, converts block offsets back to absolute UTF-16 offsets, requires entity text to equal its snapshot label, and returns canonical sorted occurrences. Query extraction converts the collapsed Draft selection into absolute offsets before calling Task 9's `findMentionQuery`. Suggestion insertion uses `Modifier.replaceText` for the server label, applies a new `MENTION` entity using `uuidv4()` by default, inserts one trailing space without an entity, pushes one undoable change, and forces the selection after that space.
+In `draftail.test.ts`, cover plain/multiline hydration, emoji offsets, multiple blocks, repeated users, duplicate labels, deterministic extraction, edits before/after/through entities, cut, selected replacement, plain-text paste, query extraction, suggestion insertion with injected UUID, and text/entity undo/redo.
 
-- [ ] **Step 4: Implement the accessible toolbar-free editor**
+Hydration is all-or-nothing: validate canonical order, unique keys, non-overlap, bounds and UTF-16 boundaries, one-block containment, and exact label slices **before applying any entity**. One invalid/cross-block/mismatched occurrence produces plain text with no entities.
 
-Define an inert source component because Draftail's `EntityTypeControl` contract requires one even though mentions are inserted only through the autocomplete. Define the entity type once and let `MentionEntity` read `mentionedUsers` from a provider wrapped around the editor, so live metadata changes rerender decoration without becoming entity data or editor content:
+Prove `MUTABLE` partial edits keep edited characters, then remove the complete mismatched entity association using `EditorState.set` so normalization adds no undo entry. Suggestion insertion must replace query text, apply one entity, add one unlinked trailing space, and create one non-coalescing `EditorState.push(..., 'apply-entity')` undo boundary.
 
-```tsx
-const MentionEntitySource = () => null;
+In `MentionEditor/index.test.tsx`, cover one Draftail contenteditable, no textarea/toolbars/format controls, local selection-only `EditorState` changes with no parent callback, parent callback only when serialized text/occurrences change, equal Redux echoes preserving selection/history, genuine external changes rehydrating, and metadata-only changes rerendering decoration without rehydration.
 
-const mentionEntityType: EntityTypeControl = {
-  type: 'MENTION',
-  source: MentionEntitySource,
-  decorator: MentionEntity,
-};
-```
+Cover capture-phase keyboard behavior: ready Enter prevents default and stops propagation before Draft inserts a newline; ordinary Enter remains multiline; Tab closes without either; Ctrl/Cmd+B/I/U are prevented. Composition-end waits for the subsequent Draft `onChange` before querying. Cover Arrow wrap, Escape, pointer selection without blur, loading/ready/empty/error status, rich paste stripping, and one-step undo/redo.
 
-The decorator never calls Draftail's `onEdit`, and mention creation always uses Draft.js `IMMUTABLE` mutability in the Task 12 conversion helper. Render controlled `DraftailEditor` with these fixed capabilities:
+Assert the actual contenteditable receives the stable `id`, `data-focus-target`, Draftail `ariaLabel`, merged/de-duplicated `ariaDescribedBy`, combobox/listbox ownership/expanded/active-option state, and stale-attribute cleanup. Assert exact labels `Add a comment`, `Edit comment`, `Add a reply`, and `Edit reply`.
 
-```tsx
-<DraftailEditor
-  editorState={editorState}
-  onChange={handleEditorChange}
-  multiline
-  stripPastedStyles
-  blockTypes={[]}
-  inlineStyles={[]}
-  entityTypes={[mentionEntityType]}
-  controls={[]}
-  topToolbar={null}
-  bottomToolbar={null}
-  commandToolbar={null}
-  commands={false}
-  enableHorizontalRule={false}
-  enableLineBreak={false}
-  showUndoControl={false}
-  showRedoControl={false}
-/>
-```
+Renderer/integration tests cover escaped plain text, repeated/multiple/malformed ranges, `.comment__mention`, saved visible label, `data-mention-user-id`, separately hydrated `data-mention-email`, no admin link, comment/reply add/edit/save/cancel, and error isolation.
 
-On each editor-state change, normalize any entity whose current text differs from its stored label by removing that entity association, then serialize and call `onChange(value, mentions)` once. Keep focus and selection in Draftail. When parent props change, compare canonical serialized props with the current editor state: ignore an equal Redux echo so selection and undo history survive, but close suggestions and rebuild the editor state for a genuinely different external text/occurrence value such as cancel or server hydration. A `mentionedUsers`-only change flows through the decorator context and never rebuilds editor state. A small ref-backed ARIA bridge sets `role="combobox"`, `aria-multiline="true"`, `aria-autocomplete="list"`, `aria-haspopup="listbox"`, `aria-controls`, `aria-expanded`, and `aria-activedescendant` on Draft.js's actual contenteditable element and removes stale attributes on close/unmount. When `error` is present, render an adjacent `role="alert"` element with a stable ID and add that ID to `aria-describedby` on the actual contenteditable; remove the attribute when the error clears or the component unmounts. The popup uses `role="listbox"`; items use stable IDs, `role="option"`, and `aria-selected`. Use localized `role="status" aria-live="polite"` text for loading, no matches, unavailable, result count, and active-option changes.
+- [ ] **Step 3: Run the combined RED suite**
 
-Handle suggestion navigation on bubbled editor key events without a DOM caret walker: ArrowUp/Down changes the active result, Enter inserts only when results are ready, Escape closes, and Tab closes without `preventDefault`. Pointer `mousedown` prevents editor blur and inserts against the saved Draft selection. Composition suppresses queries until `compositionend`; blur, cancel, deletion, and unmount abort outstanding work.
-
-- [ ] **Step 5: Integrate all comment and reply modes**
-
-Comments use IDs `comment-mention-editor-${localId}` with localized labels `Add a comment` / `Edit comment`. New replies use `comment-new-reply-mention-editor-${comment.localId}` and `comment.newReplyMentions`; existing reply edits use `comment-reply-mention-editor-${comment.localId}-${reply.localId}` and `reply.newMentions`.
-
-Pass `settings.mentionedUsers` to every editor and saved renderer. Pass each message's generic server error only to its own editor and clear it on the next local text/mention change. Save commits text and mentions together; cancel restores both; new-reply cancel clears both; display uses `MentionText` for comments and replies. Style inline entities, errors, and selected options for normal and `@media (forced-colors: active)`, cap popup height with scrolling, suppress every Draftail toolbar container, and delete prototype contenteditable/caret-walker styles.
-
-- [ ] **Step 6: Run complete CommentApp unit/style/type verification**
+Run:
 
 ```bash
-npm run test:unit -- --runInBand client/src/components/CommentApp
-./node_modules/.bin/eslint --report-unused-disable-directives client/src/components/CommentApp
-./node_modules/.bin/prettier --check client/src/components/CommentApp
+npm run test:unit -- --runInBand client/src/components/CommentApp client/src/entrypoints/admin/comments.test.js
+```
+
+Expected: FAIL because occurrence-aware state, rejection hydration, Mini Draftail helpers/components, and migrated consumers do not yet exist. Do not attempt to make an intermediate partial migration pass `npm run lint:ts`.
+
+- [ ] **Step 4: Implement occurrence state, hidden forms, and separate hydration paths**
+
+Create the new component directories before adding files:
+
+```bash
+mkdir -p client/src/components/CommentApp/components/MentionEditor client/src/components/CommentApp/components/MentionText
+```
+
+Deserialize all server occurrences through Task 9 and deep-copy arrays/elements at every initial/current/original boundary. Canonical serialized arrays drive dirty checks. Keep `mention_error` presentation-only. Restore ordinary `Author` to ID/name/avatar only and place current email exclusively under `settings.mentionedUsers`.
+
+`updateData` performs success rebasing. `hydrateRejectedData` merges bound working values/errors without replacing originals or removed entries, restores exact edit/create modes, and keeps genuinely changed values dirty. Preserve bound unsaved messages until cancel. Keep all errors message-local.
+
+Update the entrypoint listeners exactly as follows in behavior:
+
+```javascript
+document.addEventListener('w-autosave:success', ({ detail }) => {
+  if (detail?.data?.comments) {
+    commentApp.updateData(detail.data.comments);
+  }
+});
+
+document.addEventListener('w-autosave:error', ({ detail }) => {
+  if (detail?.response?.comments) {
+    commentApp.hydrateRejectedData(detail.response.comments);
+  }
+});
+```
+
+- [ ] **Step 5: Implement deterministic Draft hydration, extraction, and insertion**
+
+Use `ContentState.createFromText(value)` and map absolute UTF-16 offsets into ordinary Draft blocks. Validate the full list first. Create `MUTABLE` entities containing only `{ key, userId, label }`. Extraction joins blocks with `\n`, walks contiguous `MENTION` ranges, verifies entity text equals the snapshot label, converts to absolute offsets, and returns canonical occurrences.
+
+On every Draft change, remove all associations for entities whose current text differs from their stored label by replacing current content with `EditorState.set`, then serialize. Insertion uses one final content state and one `apply-entity` push, followed by forced selection after the trailing space.
+
+- [ ] **Step 6: Implement the accessible toolbar-free editor**
+
+Render controlled Draftail with no block/inline/formatting controls and its only entity type `MENTION`. Keep every `EditorState` change locally, notifying the parent only for a serialized value/occurrence change. Pass `ariaLabel={label}` and `ariaDescribedBy` directly to Draftail; bridge ID, focus target, popup state, ownership, and active option to the actual Draft.js contenteditable. Merge caller and error descriptions rather than overwriting either.
+
+Use the Task 11 hook, `onKeyDownCapture`, saved Draft selection for pointer insertion, and subsequent-`onChange` composition query recomputation. The decorator reads `mentionedUsers` from context, renders snapshot text plus separate metadata attributes, never calls Draftail `onEdit`, and never becomes a link.
+
+- [ ] **Step 7: Migrate every comment and reply mode atomically**
+
+Use stable IDs:
+
+```text
+comment-mention-editor-${localId}
+comment-new-reply-mention-editor-${comment.localId}
+comment-reply-mention-editor-${comment.localId}-${reply.localId}
+```
+
+Save/cancel text and occurrences together. New-reply cancel clears both; existing cancel restores both. Pass the message's own generic error and merged description IDs. Replace saved `CommentText` with `MentionText` for comments and replies, then delete both legacy/prototype components and tests listed above.
+
+- [ ] **Step 8: Add CSS once and finish visual/accessibility states**
+
+Import `draft-js/dist/Draft.css` exactly once from CommentApp `main.scss`. Style inline mentions, errors, selected options, popup scrolling, hidden Draftail toolbar containers, and forced-colors states in `Comment/style.scss`. Remove prototype contenteditable/caret-walker styling.
+
+- [ ] **Step 9: Run the complete frontend verification gate**
+
+```bash
+npm run test:unit -- --runInBand client/src/components/CommentApp client/src/entrypoints/admin/comments.test.js
+./node_modules/.bin/eslint --report-unused-disable-directives client/src/components/CommentApp client/src/entrypoints/admin/comments.js client/src/entrypoints/admin/comments.test.js
+./node_modules/.bin/prettier --check client/src/components/CommentApp client/src/entrypoints/admin/comments.js client/src/entrypoints/admin/comments.test.js
 ./node_modules/.bin/stylelint "client/src/components/CommentApp/**/*.scss"
 npm run lint:ts
+npm run build
 ```
 
-Expected: all PASS and no snapshot/update warnings; tests prove plain model text, inline `MENTION` spans, current-email metadata separation, and no formatting UI.
+Expected: all commands PASS; no toolbar/textarea remains; partial edits preserve plain characters but remove identity; rejection hydration remains dirty and message-local; and there are no spurious parent callbacks.
 
-- [ ] **Step 7: Commit Mini Draftail comment/reply UI**
+- [ ] **Step 10: Commit the complete atomic frontend migration**
 
 ```bash
-git add client/src/components/CommentApp
+git add -A -- client/src/components/CommentApp/state/comments.ts client/src/components/CommentApp/state/comments.test.ts client/src/components/CommentApp/state/settings.ts client/src/components/CommentApp/selectors/index.ts client/src/components/CommentApp/selectors/selectors.test.ts client/src/components/CommentApp/__fixtures__/state.tsx client/src/components/CommentApp/components/Form/index.tsx client/src/components/CommentApp/components/Form/index.test.tsx client/src/components/CommentApp/main.tsx client/src/components/CommentApp/main.test.tsx client/src/components/CommentApp/main.scss client/src/components/CommentApp/components/MentionEditor/draftail.ts client/src/components/CommentApp/components/MentionEditor/draftail.test.ts client/src/components/CommentApp/components/MentionEditor/index.tsx client/src/components/CommentApp/components/MentionEditor/index.test.tsx client/src/components/CommentApp/components/MentionText/index.tsx client/src/components/CommentApp/components/MentionText/index.test.tsx client/src/components/CommentApp/components/MentionTextArea/index.tsx client/src/components/CommentApp/components/MentionTextArea/index.test.tsx client/src/components/CommentApp/components/Comment/CommentText.tsx client/src/components/CommentApp/components/Comment/CommentText.test.tsx client/src/components/CommentApp/components/Comment/index.tsx client/src/components/CommentApp/components/Comment/index.test.tsx client/src/components/CommentApp/components/Comment/style.scss client/src/components/CommentApp/components/CommentReply/index.tsx client/src/components/CommentApp/components/CommentReply/index.test.tsx client/src/entrypoints/admin/comments.js client/src/entrypoints/admin/comments.test.js
 git commit -m "Add Mini Draftail comment mention editing"
 ```
 
+Expected: one reviewable commit contains the entire frontend state/editor/consumer migration and no server files.
+
 ---
 
-### Task 13: Chromium and Axe Browser Regression
+### Task 13: Fresh-Database Chromium and Axe Browser Regression
 
 **Files:**
 - Create: `client/tests/integration/comment-mentions.test.js`
+- Modify: `wagtail/test/settings_ui.py`
+- Modify only for a verified browser defect: Task 12-owned CommentApp files and their focused tests
 
 **Interfaces:**
-- Consumes: settings UI server, setup-created `admin` superuser, create-page parent ID 2, stable editor IDs from Task 12.
-- Produces: full create/edit/comment/reply browser evidence for both primary and compatibility worktrees.
+- Consumes: Tasks 8-12, the production bundle, settings-UI server, create-page parent ID 2, and Task 12's stable editor IDs.
+- Produces: automated primary Chromium/Axe evidence reusable on 7.4 in Task 15 and beta-or-later in Task 16.
+- Browser scope: the default settings-UI user proves opaque string IDs; UUID/custom-PK behavior remains a backend/frontend-unit claim unless a separate UUID browser environment is actually provisioned.
 
-- [ ] **Step 1: Write the failing Playwright scenario**
+Freeze these exact scenario values:
 
-Use `/admin/pages/add/demosite/standardpage/2/`. The test must:
+```javascript
+const baselinePrefix = 'Mention baseline 😀\nReview with ';
+const queryText = `${baselinePrefix}@adm`;
+const selectedText = `${baselinePrefix}@admin@example.com`;
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-1. Fill the required page title with a per-run unique value, wait for its slug, and open a comment through the first `[data-comment-add]` control.
-2. Type the same representative multiline text and emoji as the Task 1 baseline plus `@adm` into the toolbar-free Draftail contenteditable under the stable create-comment editor ID; assert no Draftail formatting toolbar or controls exist.
-3. Assert loading then populated status and run Axe with popup closed/loading/populated.
-4. Select `admin` by ArrowDown/Enter, verify an inline `.comment__mention` entity and a hidden five-field occurrence, and assert the entity exposes current email metadata without changing its visible snapshot label.
-5. Save the comment, save/autosave the page, follow the returned/hydrated edit URL, and assert the same plain text/range/entity after reload.
-6. Edit before/after/through the entity, asserting Draft.js shifts/retention/drop, selection replacement, plain-text paste, and text/entity undo/redo.
-7. Add, edit, cancel, save, reload, and remove a reply mention.
-8. Query a guaranteed no-match string, assert empty status, and run Axe.
-9. Press Tab with results open and assert focus moves instead of inserting; verify the contenteditable listbox attributes close cleanly.
+const expectedOccurrence = {
+  key: expect.stringMatching(uuidPattern),
+  user_id: '1',
+  start: 32,
+  end: 50,
+  label: '@admin@example.com',
+};
+```
 
-Use `expect(page).toPassAxeTests({include: '.comment'})` for each named state and inspect the hidden inputs rather than private React state. When `COMMENT_MENTIONS_EVIDENCE_DIR` is set, use Node's `fs.promises.mkdir` and `page.screenshot()` to write supplemental `autocomplete-open.png` and final `after-redesign.png` evidence there; otherwise write no artifact. Match the Task 1 viewport and representative content for `after-redesign.png`, and keep generated files out of git.
+- [ ] **Step 1: Make the settings-UI database name configurable**
 
-- [ ] **Step 2: Start the UI server and verify red state**
+In `wagtail/test/settings_ui.py`, import `os` and set:
 
-Prepare once:
+```python
+DATABASES["default"]["NAME"] = os.environ.get(  # noqa: F405
+    "WAGTAIL_UI_TEST_DB", "ui_tests.db"
+)
+```
+
+Keep the existing default for ordinary integration use; Task 13 always supplies a fresh temporary path.
+
+- [ ] **Step 2: Write the complete Playwright scenario**
+
+Use `/admin/pages/add/demosite/standardpage/2/` and a 120-second test timeout. The scenario must:
+
+1. Disable create autosave by setting `data-w-autosave-active-value="false"` before changing the title or comments.
+2. Fill a unique required title, await its slug, open the first comment editor, and type `queryText` into the stable create-comment Draftail contenteditable.
+3. Assert there is one contenteditable and no textarea, Draftail toolbar, formatting control, or rich-text widget.
+4. Intercept the first real suggestion response with `route.fetch()`, hold fulfillment while loading is visible, run loading Axe, then fulfill the real response. Assert the create suggestion endpoint URL.
+5. Select `admin` by keyboard; assert `selectedText`, inline `.comment__mention`, `data-mention-user-id="1"`, `data-mention-email="admin@example.com"`, and the exact five-field hidden object above without numeric coercion.
+6. Run Axe with the popup closed and populated; later run empty-state Axe against a guaranteed no-match query.
+7. Re-enable autosave only after the exact hidden occurrence exists, then dispatch a bubbling `w-unsaved:add` event with `detail.type = 'edits'`.
+8. Await the create POST, hydrate event, autosave success, create-action replacement, and returned edit URL. Assert the create and post-hydration edit suggestion endpoint URLs.
+9. Reload/follow the edit URL and assert exact text, entity attributes, key, opaque ID, offsets, label, and complete hidden JSON survive.
+10. Assert hidden occurrences after every edit. Prove edits before/after retain key and shift/preserve offsets, partial/whole mention replacement removes the occurrence while retaining resulting plain text, and text/entity undo/redo is exactly one step.
+11. Prove rich HTML paste becomes plain text and Ctrl/Cmd+B/I/U do not introduce formatting.
+12. Restore `selectedText` and its exact occurrence between destructive cases.
+13. Add/edit/cancel/save/reload a reply mention; finally remove the reply occurrence while retaining its reply text.
+14. Open results, press Tab, and prove focus moves normally while listbox/expanded/active-option attributes close and stale attributes disappear.
+15. Assert actual contenteditable accessible name/descriptions/focus/listbox relationships, not wrapper-only attributes.
+16. Restore the exact baseline before the final 1024x768 image, await fonts/layout, and write `autocomplete-open.png` and `after-redesign.png` only when `COMMENT_MENTIONS_EVIDENCE_DIR` is set.
+
+Do not claim that the browser mutates live email, uses a UUID user model, or performs native IME input. Attribute those to lower tests or Task 14's recorded manual native-IME pass.
+
+- [ ] **Step 3: Install/build and prepare one fresh server environment**
+
+Run from the primary worktree:
 
 ```bash
+npm ci
+npm run build
 npm --prefix client/tests/integration ci
+export PLAYWRIGHT_BROWSERS_PATH=/tmp/wagtail-comment-mentions-playwright
 npm --prefix client/tests/integration exec -- playwright install chromium
+export WAGTAIL_UI_TEST_DB="$(mktemp --suffix=.sqlite3 /tmp/wagtail-comment-mentions-task13.XXXXXX)"
+export TEST_PORT="$(uv run --extra testing python -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+export TEST_ORIGIN="http://127.0.0.1:${TEST_PORT}"
 export DJANGO_SETTINGS_MODULE=wagtail.test.settings_ui
-python ./wagtail/test/manage.py migrate
-python ./wagtail/test/manage.py createcachetable
-DJANGO_SUPERUSER_EMAIL=admin@example.com \
-DJANGO_SUPERUSER_USERNAME=admin \
-DJANGO_SUPERUSER_PASSWORD=changeme \
-python ./wagtail/test/manage.py createsuperuser --noinput
-python ./wagtail/test/manage.py runserver 0:8000
+printf 'export WAGTAIL_UI_TEST_DB=%s\nexport TEST_PORT=%s\nexport TEST_ORIGIN=%s\nexport PLAYWRIGHT_BROWSERS_PATH=%s\nexport DJANGO_SETTINGS_MODULE=%s\n' "$WAGTAIL_UI_TEST_DB" "$TEST_PORT" "$TEST_ORIGIN" "$PLAYWRIGHT_BROWSERS_PATH" "$DJANGO_SETTINGS_MODULE" > /tmp/comment-mentions-task13.env
+uv run --extra testing python ./wagtail/test/manage.py migrate --noinput
+uv run --extra testing python ./wagtail/test/manage.py createcachetable
+DJANGO_SUPERUSER_EMAIL=admin@example.com DJANGO_SUPERUSER_USERNAME=admin DJANGO_SUPERUSER_PASSWORD=changeme uv run --extra testing python ./wagtail/test/manage.py createsuperuser --noinput
+uv run --extra testing python ./wagtail/test/manage.py runserver "127.0.0.1:${TEST_PORT}" --noreload
 ```
 
-In another terminal:
+Expected: the server remains running in this terminal on the free recorded port and uses only the fresh temporary database.
+
+- [ ] **Step 4: Run the Chromium/Axe scenario in a second terminal**
 
 ```bash
-TEST_ORIGIN=http://127.0.0.1:8000 npm run test:integration -- \
-  --runInBand --runTestsByPath client/tests/integration/comment-mentions.test.js
+source /tmp/comment-mentions-task13.env
+until curl -fsS "$TEST_ORIGIN/admin/login/" >/dev/null; do sleep 0.25; done
+TEST_ORIGIN="$TEST_ORIGIN" PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" npm run test:integration -- --runInBand --runTestsByPath client/tests/integration/comment-mentions.test.js
 ```
 
-Expected before completing the test-support selectors/behavior: FAIL at the first incomplete lifecycle assertion.
+Expected: PASS is valid on the first run because Tasks 8-12 are prerequisites. Do not manufacture a RED failure. Stop the server after the run and remove the temporary database when evidence collection is complete.
 
-- [ ] **Step 3: Finish only test-required production fixes and rerun**
+- [ ] **Step 5: Fix only genuine browser discrepancies and rerun all affected gates**
 
-Fix production behavior, not expectations, for any genuine browser discrepancy. Do not add sleeps; wait for visible status, network response, form update, navigation, or hydration events.
+Do not weaken expectations or add sleeps. Wait on visible state, a held/fulfilled response, form update, autosave event, navigation, fonts, or hydration. If production code changes, return to Task 12: add the focused unit regression, rerun Task 12's full unit/lint/type/build gate, and create a separate focused Task 12 defect commit before resuming Task 13. Task 13's commit remains limited to its two known files.
 
-Expected final run: all comment mention browser and Axe tests PASS in Chromium.
-
-- [ ] **Step 4: Commit the browser regression**
+- [ ] **Step 6: Verify the integration files and commit the regression**
 
 ```bash
-git add client/tests/integration/comment-mentions.test.js client/src/components/CommentApp
+./node_modules/.bin/eslint --report-unused-disable-directives client/tests/integration/comment-mentions.test.js
+./node_modules/.bin/prettier --check client/tests/integration/comment-mentions.test.js
+uv run --extra testing python -m ruff format --check wagtail/test/settings_ui.py
+uv run --extra testing python -m ruff check wagtail/test/settings_ui.py
+```
+
+Expected: all commands PASS; generated databases, browser binaries, and screenshots remain outside git.
+
+```bash
+git add client/tests/integration/comment-mentions.test.js wagtail/test/settings_ui.py
 git commit -m "Test comment mentions in the browser"
 ```
 
+Expected: this commit contains exactly `client/tests/integration/comment-mentions.test.js` and `wagtail/test/settings_ui.py`; any verified production fix was already committed separately in Step 5. No generated artifact or unrelated source is committed.
+
 ---
 
-### Task 14: Primary Wagtail 8.0 Verification and Reviewer Artifact
+### Task 14: Current-Primary Verification and Provisional Reviewer Artifact
 
 **Files:**
-- Modify only if verification finds defects: files owned by Tasks 2-13.
-- Create during final evidence work: `docs/superpowers/compatibility/2026-07-09-comment-mentions-7.4.md` in Task 15.
-- Do not modify: `CHANGELOG.txt`, `docs/releases/8.0.md`, `CONTRIBUTORS.md`.
+- Modify only for a verified defect: files owned by Tasks 2-13 and their focused tests
+- Create outside git: `/tmp/wagtail-comment-mentions-pr/autocomplete-open.png`
+- Create outside git: `/tmp/wagtail-comment-mentions-pr/after-redesign.png`
+- Create outside git: `/tmp/wagtail-comment-mentions-pr/verification.json`
+- Create outside git: `/tmp/wagtail-comment-mentions-pr/pr-body-provisional.md`
+- Do not modify: `CHANGELOG.txt`, `docs/releases/8.0.md`, `CONTRIBUTORS.md`
 
 **Interfaces:**
-- Consumes: complete primary implementation.
-- Produces: green primary Wagtail 8.0 matrix and a PR body drafted from the final diff; results remain provisional if `VERSION` still reports alpha.
+- Consumes: complete Tasks 2-13 and the exact current primary OID/version.
+- Produces: a complete current-primary matrix plus a provisional, unsubmitted reviewer artifact.
+- Current-alpha rule: an 8.0 alpha PASS is development evidence only. It does not satisfy Task 16 or authorize publication.
 
-- [ ] **Step 1: Run the complete focused backend matrix**
+- [ ] **Step 1: Activate and record the direct/tox environments**
 
 ```bash
+source .venv/bin/activate
+export UV_CACHE_DIR=/tmp/wagtail-comment-mentions-uv-cache
+mkdir -p "$UV_CACHE_DIR" /tmp/wagtail-comment-mentions-pr
+python --version
 python -c 'import wagtail; print(wagtail.__version__)'
+uvx --python 3.13 --from 'tox>=4,<5' tox --version
+```
+
+Expected: record the activated direct Python deliberately, including 3.14 if that is the repository environment; tox is explicitly provisioned with Python 3.13 rather than selecting a host interpreter implicitly.
+
+- [ ] **Step 2: Run the complete focused primary backend matrix**
+
+```bash
 BACKEND_TESTS=(
   wagtail.tests.test_comments
   wagtail.admin.tests.test_comment_mentions
@@ -2134,47 +2264,58 @@ BACKEND_TESTS=(
   wagtail.admin.tests.pages.test_edit_page
   wagtail.admin.tests.test_audit_log
   wagtail.tests.permission_policies.test_page_permission_policies
+  wagtail.admin.tests.test_workflows.TestCommentMentionWorkflows
 )
 
 python runtests.py -- "${BACKEND_TESTS[@]}"
 USE_EMAIL_USER_MODEL=yes python runtests.py -- "${BACKEND_TESTS[@]}"
-
-uvx --from 'tox>=4,<5' tox \
-  -e py313-dj52-sqlite-noelasticsearch-customuser-tz -- "${BACKEND_TESTS[@]}"
-uvx --from 'tox>=4,<5' tox \
-  -e py313-dj60-sqlite-noelasticsearch-emailuser-tz -- "${BACKEND_TESTS[@]}"
+uvx --python 3.13 --from 'tox>=4,<5' tox -e py313-dj52-sqlite-noelasticsearch-customuser-tz -- "${BACKEND_TESTS[@]}"
+uvx --python 3.13 --from 'tox>=4,<5' tox -e py313-dj60-sqlite-noelasticsearch-emailuser-tz -- "${BACKEND_TESTS[@]}"
 ```
 
-Expected: all commands PASS and the exact Wagtail 8.0 version is recorded. An alpha run is valid development evidence but does not discharge Task 16's beta-or-later gate.
+Expected: all four commands PASS. Record Wagtail, Django, Python, user model, and environment for each; UUID/custom-PK conclusions come from the email-user runs, not the default browser.
 
-- [ ] **Step 2: Run complete frontend/build/static verification**
+- [ ] **Step 3: Run complete frontend, formatting, build, migration, and diff gates**
 
 ```bash
-npm run test:unit:coverage -- --runInBand client/src/components/CommentApp
+npm run test:unit:coverage -- --runInBand client/src/components/CommentApp client/src/entrypoints/admin/comments.test.js
 npm run lint:ts
 npm run lint:js
 npm run lint:css
 npm run lint:format
 npm run lint:project
 npm run build
-```
-
-Expected: all PASS.
-
-- [ ] **Step 3: Run migration, formatting, diff, and browser gates**
-
-```bash
+DJANGO_SETTINGS_MODULE=wagtail.test.settings python -m django makemigrations --check --dry-run
+make lint-server
 source /tmp/comment-mentions-bases.env
-DJANGO_SETTINGS_MODULE=wagtail.test.settings \
-  python -m django makemigrations --check --dry-run
-ruff format --check wagtail/admin wagtail/models/pages.py wagtail/migrations/0098_comment_mentions.py
-ruff check wagtail/admin wagtail/models/pages.py wagtail/migrations/0098_comment_mentions.py
 git diff --check "$OFFICIAL_MAIN"..HEAD
 ```
 
-Rerun the Task 13 Chromium/Axe command with `COMMENT_MENTIONS_EVIDENCE_DIR=/tmp/wagtail-comment-mentions-pr` so it captures `autocomplete-open.png` and `after-redesign.png`. Compare `before-redesign.png` from `REDESIGN_BASE` with the final image at the same viewport/content; do not commit image artifacts. Run the same user path manually in current Firefox and record Firefox version, OS, keyboard, multiline, paste, emoji, reload, inline entity highlighting, and popup-accessibility outcomes for the PR/compatibility report.
+Expected: all commands PASS. Use the canonical whole-repository server lint; do not substitute selected Ruff paths as final server evidence.
 
-- [ ] **Step 4: Review the final primary diff and history**
+- [ ] **Step 4: Rerun Task 13 with primary evidence output**
+
+Use Task 13's fresh database, free port, explicit interpreter, `--noreload`, readiness, and cleanup contract with:
+
+```bash
+export COMMENT_MENTIONS_EVIDENCE_DIR=/tmp/wagtail-comment-mentions-pr
+```
+
+Expected: Chromium/Axe PASS with exact plain comment/reply values and hidden JSON before submit and after reload, rich-paste stripping, blocked formatting shortcuts, actual contenteditable ARIA/focus/listbox state, and stale-attribute cleanup. Validate screenshot dimensions and checksums.
+
+- [ ] **Step 5: Run and record real native-input browser evidence**
+
+On the exact primary head, manually run the same representative path in current Chromium and Firefox using a real installed IME. Record OS, browser versions, input method, entered text, caret result, pointer selection, multiline input, paste, emoji, reload, inline entity highlighting, and popup keyboard/accessibility results.
+
+Expected: both native-IME/caret/pointer passes are recorded. If native IME is unavailable, Task 14 remains incomplete and its provisional text narrows the claim; Task 16 cannot make the final IME-safe claim. State explicitly that Axe is not an assistive-technology test, no AT test was run unless one actually was, and WebKit/Safari was not tested.
+
+- [ ] **Step 6: Write and validate exact provisional metadata**
+
+Write `/tmp/wagtail-comment-mentions-pr/verification.json` with full `OFFICIAL_MAIN`, primary HEAD, exact Wagtail version, Python/Django/tox/Ruff versions, 1024x768 viewport, OS, Chromium/Firefox versions, image checksums, commands/results, and which evidence is backend-only.
+
+Expected: notification delivery/recipient merging is attributed to backend tests unless a second browser recipient was actually seeded. UUID is backend/frontend-unit only. No unrun browser/AT claim appears.
+
+- [ ] **Step 7: Review primary history and draft, but do not publish, the PR body**
 
 ```bash
 source /tmp/comment-mentions-bases.env
@@ -2184,125 +2325,325 @@ git log --oneline "$OFFICIAL_MAIN"..HEAD
 git status --short --branch
 ```
 
-Expected: only mention-related code/tests/design/plan files; no generated build output, caches, unrelated edits, release files, or uncommitted changes.
+Expected: only mention-related source/tests/planning evidence; no generated output, caches, release files, unrelated commits, or uncommitted changes.
 
-- [ ] **Step 5: Draft the PR description from the final diff**
+Write `/tmp/wagtail-comment-mentions-pr/pr-body-provisional.md` from `.github/PULL_REQUEST_TEMPLATE.md`. Include literal current results and these exact markers:
 
-Use `.github/PULL_REQUEST_TEMPLATE.md` and keep the existing PR rather than opening a replacement. Give it a descriptive feature title, preserve the linked issue, and include a one-sentence solution summary, assumptions, before/after screenshots, and explicit Chromium/Axe/Firefox results as required by Wagtail's first-contribution guide. Explain why plain model text, Mini Draftail entities, occurrence JSON, exact-message inverse indexes, live-email metadata separation, and recipient merging are the right solution. Call out UTF-16 validation, lookup synchronization, create-page recheck, DB-backed candidate filtering, notification overlap, and both 7.4 and 8.0 beta-or-later evidence for careful review. Include the exact tested Wagtail version/OID for each release line; label any alpha result provisional. Include suggested `CHANGELOG.txt`, `docs/releases/8.0.md`, and contributor wording for a core committer, but do not edit those files.
+```text
+PENDING TASK 15 7.4 EVIDENCE
+PENDING TASK 16 8.0 BETA-OR-LATER EVIDENCE
+PENDING SCREENSHOT UPLOAD
+```
 
-End with:
+Include `Fixes #`, `### Description`, `### AI usage`, rationale/review areas, exact current OID/version, negative browser/AT disclosures, suggested core-committer release/contributor copy, and:
 
+```text
 > This pull request includes code written with the assistance of AI.
 > The code has **not yet been reviewed** by a human.
+```
 
-Do not push or edit PR 1 until the user authorizes publication.
+Expected: if VERSION is alpha, every result is clearly provisional. Do not edit the live PR, upload/push anything, or imply Task 15/16 has passed.
+
+- [ ] **Step 8: Commit only verified defects, if any**
+
+If verification changed production/test code, run the affected focused gate plus Steps 2-5 again, stage only the named defect files/tests, and commit a focused fix. If no defect was found, create no Task 14 commit. Temporary evidence remains untracked.
 
 ---
 
-### Task 15: Retained Wagtail 7.4 Backport and Reproducible Compatibility Report
+### Task 15: Retained Wagtail 7.4 Backport and Provisional Compatibility Report
 
 **Files:**
-- Create in sibling worktree: local branch `compat/comment-mentions-7.4` at `/home/jt/dev/made-with-future/wagtail-compat-comment-mentions-7.4`.
-- Create on primary: `docs/superpowers/compatibility/2026-07-09-comment-mentions-7.4.md`.
-- Modify on compatibility only: `wagtail/admin/urls/pages.py` for direct view registration and migration dependency/filename only if the freshly fetched graph differs.
+- Create as a sibling worktree: `/home/jt/dev/made-with-future/wagtail-compat-comment-mentions-7.4`
+- Create as a local-only branch: `compat/comment-mentions-7.4`
+- Modify on compatibility only: `wagtail/admin/urls/pages.py`
+- Modify on compatibility only when the refreshed graph requires it: the dynamically discovered comment-mentions migration filename/dependency
+- Create on primary: `docs/superpowers/compatibility/2026-07-09-comment-mentions-7.4.md`
+- Do not create/push a remote compatibility branch
 
 **Interfaces:**
-- Consumes: final runtime/test diff relative to `PRIMARY_BASE`, exact official stable OID, primary verification commands.
-- Produces: retained committed compatibility head, patch SHA-256, adaptation table, range/file comparison, and two-branch test evidence.
+- Consumes: the exact Task 14 primary runtime head, refreshed official `main` and `stable/7.4.x`, and Tasks 9-13 runtime/tests.
+- Produces: one retained initial compatibility commit, a frozen primary runtime patch/SHA, adaptation-aware equivalence evidence, a complete 7.4 matrix, and a provisional primary report for Task 16.
 
-- [ ] **Step 1: Refresh refs again and create the retained worktree safely**
+Preserve these meanings:
 
-Run with network/filesystem approval:
+```text
+PRIMARY_RUNTIME_HEAD = exact primary source head tested/checksummed by Tasks 14-15
+PRIMARY_REPORT_HEAD  = later primary commit that changes only the compatibility report
+OFFICIAL_STABLE      = exact refreshed stable/7.4.x base
+COMPAT_RUNTIME_HEAD  = exact tested compatibility head
+PATCH                = frozen PRIMARY_BASE..PRIMARY_RUNTIME_HEAD runtime/test patch
+PATCH_SHA256         = identity of PATCH only, not proof of cross-branch equivalence
+```
+
+Task 15 browser scope is default opaque-string IDs. UUID/custom-PK compatibility is proved by backend/email-user and frontend wire tests; do not claim a UUID browser run. Firefox evidence remains primary-only.
+
+- [ ] **Step 1: Refresh both official refs, freeze primary provenance, and enter the retained worktree safely**
+
+Detect and validate frozen state **before** fetching, deriving a head, or exporting anything:
 
 ```bash
-source /tmp/comment-mentions-bases.env
-COMPAT=/home/jt/dev/made-with-future/wagtail-compat-comment-mentions-7.4
-
-git -C "$PRIMARY_WORKTREE" fetch --no-tags https://github.com/wagtail/wagtail.git \
-  +refs/heads/main:refs/remotes/upstream/main \
-  +refs/heads/stable/7.4.x:refs/remotes/upstream/stable/7.4.x
-
-OFFICIAL_MAIN=$(git -C "$PRIMARY_WORKTREE" rev-parse refs/remotes/upstream/main)
-OFFICIAL_STABLE=$(git -C "$PRIMARY_WORKTREE" rev-parse refs/remotes/upstream/stable/7.4.x)
-PRIMARY_BASE=$(git -C "$PRIMARY_WORKTREE" merge-base "$OFFICIAL_MAIN" HEAD)
-PRIMARY_VERSION=$(python -c 'import wagtail; print(wagtail.__version__)')
-test "$PRIMARY_BASE" = "$OFFICIAL_MAIN"
-
-{
-  printf 'PRIMARY_WORKTREE=%s\n' "$PRIMARY_WORKTREE"
-  printf 'OFFICIAL_MAIN=%s\n' "$OFFICIAL_MAIN"
-  printf 'OFFICIAL_STABLE=%s\n' "$OFFICIAL_STABLE"
-  printf 'PRIMARY_BASE=%s\n' "$PRIMARY_BASE"
-  printf 'REDESIGN_BASE=%s\n' "$REDESIGN_BASE"
-  printf 'PRIMARY_VERSION=%s\n' "$PRIMARY_VERSION"
-} > /tmp/comment-mentions-bases.env
-
-if test -e "$COMPAT"; then
-  test "$(git -C "$COMPAT" branch --show-current)" = "compat/comment-mentions-7.4"
+TASK15_BASES_ENV=/tmp/comment-mentions-bases.env
+TASK15_COMPAT_ENV=/tmp/comment-mentions-compat.env
+TASK15_RESUME=fresh
+if test -s "$TASK15_COMPAT_ENV"; then
+  test -s "$TASK15_BASES_ENV"
+  source "$TASK15_BASES_ENV"
+  source "$TASK15_COMPAT_ENV"
+  test -n "$PRIMARY_WORKTREE"
+  test -n "$COMPAT"
+  test -n "$OFFICIAL_MAIN"
+  test -n "$OFFICIAL_STABLE"
+  test -n "$PRIMARY_BASE"
+  test -n "$REDESIGN_BASE"
+  test -n "$PRIMARY_VERSION"
+  test -n "$PRIMARY_RUNTIME_HEAD"
+  test -n "$COMPAT_RUNTIME_HEAD"
+  test -n "$PATCH"
+  test -n "$PATCH_SHA256"
+  test "$PRIMARY_HEAD" = "$PRIMARY_RUNTIME_HEAD"
+  test "$COMPAT_HEAD" = "$COMPAT_RUNTIME_HEAD"
+  test "$(git -C "$PRIMARY_WORKTREE" rev-parse --show-toplevel)" = "$PRIMARY_WORKTREE"
+  test "$(git -C "$COMPAT" rev-parse --show-toplevel)" = "$COMPAT"
+  test "$(git -C "$COMPAT" branch --show-current)" = compat/comment-mentions-7.4
+  test "$(git -C "$PRIMARY_WORKTREE" rev-parse "$REDESIGN_BASE^{commit}")" = "$REDESIGN_BASE"
+  test "$(git -C "$PRIMARY_WORKTREE" merge-base "$PRIMARY_BASE" "$PRIMARY_RUNTIME_HEAD")" = "$PRIMARY_BASE"
   test -z "$(git -C "$COMPAT" status --short)"
+  test -z "$(git -C "$PRIMARY_WORKTREE" status --short)"
+  test -s "$PATCH"
+  test "$(sha256sum "$PATCH" | cut -d' ' -f1)" = "$PATCH_SHA256"
+  CURRENT_PRIMARY_HEAD="$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)"
+  CURRENT_COMPAT_HEAD="$(git -C "$COMPAT" rev-parse HEAD)"
+
+  if test "$COMPAT_RUNTIME_HEAD" = "$OFFICIAL_STABLE"; then
+    test -z "${PRIMARY_REPORT_HEAD:-}"
+    if test "$CURRENT_COMPAT_HEAD" = "$OFFICIAL_STABLE"; then
+      COMPAT_RESUME=apply
+      TASK15_RESUME=apply
+    else
+      test "$(git -C "$COMPAT" rev-list --count "$OFFICIAL_STABLE".."$CURRENT_COMPAT_HEAD")" = 1
+      test "$(git -C "$COMPAT" rev-parse "$CURRENT_COMPAT_HEAD^")" = "$OFFICIAL_STABLE"
+      COMPAT_RUNTIME_HEAD="$CURRENT_COMPAT_HEAD"
+      COMPAT_HEAD="$CURRENT_COMPAT_HEAD"
+      COMPAT_RESUME=verify
+      TASK15_RESUME=verify
+    fi
+  else
+    test "$CURRENT_COMPAT_HEAD" = "$COMPAT_RUNTIME_HEAD"
+    test "$(git -C "$COMPAT" rev-list --count "$OFFICIAL_STABLE"..HEAD)" = 1
+    test "$(git -C "$COMPAT" rev-parse HEAD^)" = "$OFFICIAL_STABLE"
+    COMPAT_RESUME=verify
+    TASK15_RESUME=verify
+  fi
+
+  if test -n "${PRIMARY_REPORT_HEAD:-}"; then
+    test -n "$PRIMARY_HANDOFF_HEAD"
+    test "$PRIMARY_HANDOFF_HEAD" = "$PRIMARY_REPORT_HEAD"
+    test "$CURRENT_PRIMARY_HEAD" = "$PRIMARY_REPORT_HEAD"
+    test "$(git -C "$PRIMARY_WORKTREE" rev-parse "$PRIMARY_REPORT_HEAD^")" = "$PRIMARY_RUNTIME_HEAD"
+    test "$(git -C "$PRIMARY_WORKTREE" diff --name-only "$PRIMARY_RUNTIME_HEAD" "$PRIMARY_REPORT_HEAD")" = docs/superpowers/compatibility/2026-07-09-comment-mentions-7.4.md
+    TASK15_RESUME=completed
+  elif test "$CURRENT_PRIMARY_HEAD" = "$PRIMARY_RUNTIME_HEAD"; then
+    :
+  else
+    test "$COMPAT_RUNTIME_HEAD" != "$OFFICIAL_STABLE"
+    test "$(git -C "$PRIMARY_WORKTREE" rev-parse "$CURRENT_PRIMARY_HEAD^")" = "$PRIMARY_RUNTIME_HEAD"
+    test "$(git -C "$PRIMARY_WORKTREE" diff --name-only "$PRIMARY_RUNTIME_HEAD" "$CURRENT_PRIMARY_HEAD")" = docs/superpowers/compatibility/2026-07-09-comment-mentions-7.4.md
+    PRIMARY_REPORT_HEAD="$CURRENT_PRIMARY_HEAD"
+    PRIMARY_HANDOFF_HEAD="$CURRENT_PRIMARY_HEAD"
+    TASK15_RESUME=report-handoff
+  fi
+  TASK15_FROZEN=1
 else
-  test -z "$(git -C "$PRIMARY_WORKTREE" branch --list compat/comment-mentions-7.4)"
-  git -C "$PRIMARY_WORKTREE" worktree add "$COMPAT" \
-    -b compat/comment-mentions-7.4 "$OFFICIAL_STABLE"
+  TASK15_FROZEN=0
 fi
 ```
 
-Expected: clean compatibility branch at the recorded official 7.4 OID. On a resumed execution, reuse the existing retained worktree and assert it is clean; never reset/recreate it.
+Expected for frozen resume: use the recorded canonical runtime/report heads and immutable patch; never classify the current report HEAD as runtime and never regenerate the patch.
 
-- [ ] **Step 2: Export the redesigned net runtime/test patch, excluding primary-only artifacts**
+For `TASK15_FROZEN=0`, run the fresh-entry path with network/filesystem approval:
 
 ```bash
-source /tmp/comment-mentions-bases.env
+source "$TASK15_BASES_ENV"
+REMOTE=https://github.com/wagtail/wagtail.git
 COMPAT=/home/jt/dev/made-with-future/wagtail-compat-comment-mentions-7.4
-PRIMARY_HEAD=$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)
-PATCH=/tmp/comment-mentions-${PRIMARY_HEAD}.patch
-
-git -C "$PRIMARY_WORKTREE" diff --binary --full-index --no-renames \
-  --output="$PATCH" "$PRIMARY_BASE" "$PRIMARY_HEAD" -- . \
-  ':(exclude)docs/superpowers/**' \
-  ':(exclude)CHANGELOG.txt' \
-  ':(exclude)CONTRIBUTORS.md' \
-  ':(exclude)docs/releases/**'
-
-sha256sum "$PATCH"
-git -C "$COMPAT" apply --check "$PATCH" || true
-git -C "$COMPAT" apply --3way --index \
-  --exclude=wagtail/admin/viewsets/pages.py \
-  --exclude=wagtail/admin/urls/pages.py \
-  "$PATCH"
+git -C "$PRIMARY_WORKTREE" fetch --no-tags "$REMOTE" +refs/heads/main:refs/remotes/upstream/main +refs/heads/stable/7.4.x:refs/remotes/upstream/stable/7.4.x
+OFFICIAL_MAIN="$(git -C "$PRIMARY_WORKTREE" rev-parse refs/remotes/upstream/main)"
+OFFICIAL_STABLE="$(git -C "$PRIMARY_WORKTREE" rev-parse refs/remotes/upstream/stable/7.4.x)"
+PRIMARY_BASE="$(git -C "$PRIMARY_WORKTREE" merge-base "$OFFICIAL_MAIN" HEAD)"
+PRIMARY_RUNTIME_HEAD="$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)"
+PRIMARY_VERSION="$(PYTHONPATH="$PRIMARY_WORKTREE" "$PRIMARY_WORKTREE/.venv/bin/python" -c 'import wagtail; print(wagtail.__version__)')"
+test "$PRIMARY_BASE" = "$OFFICIAL_MAIN"
+test -z "$(git -C "$PRIMARY_WORKTREE" status --short)"
+if test -e "$COMPAT"; then
+  test "$(git -C "$COMPAT" branch --show-current)" = compat/comment-mentions-7.4
+  test -z "$(git -C "$COMPAT" status --short)"
+  COMPAT_EXISTING_HEAD="$(git -C "$COMPAT" rev-parse HEAD)"
+  test "$COMPAT_EXISTING_HEAD" = "$OFFICIAL_STABLE"
+else
+  test -z "$(git -C "$PRIMARY_WORKTREE" branch --list compat/comment-mentions-7.4)"
+  git -C "$PRIMARY_WORKTREE" worktree add "$COMPAT" -b compat/comment-mentions-7.4 "$OFFICIAL_STABLE"
+fi
+COMPAT_EXISTING_HEAD="$(git -C "$COMPAT" rev-parse HEAD)"
+COMPAT_RUNTIME_HEAD="$COMPAT_EXISTING_HEAD"
+COMPAT_RESUME=apply
 ```
 
-Do not cherry-pick or format-patch `ea4a8c43f0`, `136e3acb83`, or `52ebbcc9ca`. Resolve no rejected hunks. Register the two shared suggestion views directly in 7.4's `wagtail/admin/urls/pages.py`; inspect the migration dependency and change it only if the refreshed stable graph requires it.
+Expected for fresh entry: primary remains exactly based on freshly fetched main and compatibility is exact stable. An existing retained commit without frozen env state hard-stops. Never reset, recreate, or reapply to recover it.
 
-- [ ] **Step 3: Commit the compatibility branch and inspect adaptations**
+- [ ] **Step 2: Export and checksum the primary runtime patch exactly once**
+
+For fresh entry only:
 
 ```bash
-source /tmp/comment-mentions-bases.env
-COMPAT=/home/jt/dev/made-with-future/wagtail-compat-comment-mentions-7.4
+test "$TASK15_FROZEN" = 0
+PATCH="/tmp/comment-mentions-${PRIMARY_RUNTIME_HEAD}.patch"
+git -C "$PRIMARY_WORKTREE" diff --binary --full-index --no-renames --output="$PATCH" "$PRIMARY_BASE" "$PRIMARY_RUNTIME_HEAD" -- . ':(exclude)docs/superpowers/**' ':(exclude)CHANGELOG.txt' ':(exclude)CONTRIBUTORS.md' ':(exclude)docs/releases/**'
+test -s "$PATCH"
+PATCH_SHA256="$(sha256sum "$PATCH" | cut -d' ' -f1)"
+test -n "$PATCH_SHA256"
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)" = "$PRIMARY_RUNTIME_HEAD"
+```
+
+Write `/tmp/comment-mentions-bases.env` and `/tmp/comment-mentions-compat.env` atomically with complete literal state. Validate every value and both worktrees immediately before replacement:
+
+```bash
+test -n "$PRIMARY_WORKTREE"
+test -n "$OFFICIAL_MAIN"
+test -n "$OFFICIAL_STABLE"
+test -n "$PRIMARY_BASE"
+test -n "$REDESIGN_BASE"
+test -n "$PRIMARY_VERSION"
+test -n "$PRIMARY_RUNTIME_HEAD"
+test -n "$COMPAT"
+test -n "$COMPAT_EXISTING_HEAD"
+test -n "$COMPAT_RUNTIME_HEAD"
+test -n "$PATCH"
+test -n "$PATCH_SHA256"
+test "$PRIMARY_BASE" = "$OFFICIAL_MAIN"
+test "$COMPAT_EXISTING_HEAD" = "$OFFICIAL_STABLE"
+test "$COMPAT_RUNTIME_HEAD" = "$COMPAT_EXISTING_HEAD"
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse --show-toplevel)" = "$PRIMARY_WORKTREE"
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)" = "$PRIMARY_RUNTIME_HEAD"
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse "$REDESIGN_BASE^{commit}")" = "$REDESIGN_BASE"
+test "$(git -C "$PRIMARY_WORKTREE" merge-base "$PRIMARY_BASE" "$PRIMARY_RUNTIME_HEAD")" = "$PRIMARY_BASE"
+test -z "$(git -C "$PRIMARY_WORKTREE" status --short)"
+test "$(git -C "$COMPAT" rev-parse --show-toplevel)" = "$COMPAT"
+test "$(git -C "$COMPAT" branch --show-current)" = compat/comment-mentions-7.4
+test "$(git -C "$COMPAT" rev-parse HEAD)" = "$COMPAT_RUNTIME_HEAD"
+test -z "$(git -C "$COMPAT" status --short)"
+test -s "$PATCH"
+test "$(sha256sum "$PATCH" | cut -d' ' -f1)" = "$PATCH_SHA256"
+
+BASES_NEXT="$(mktemp /tmp/comment-mentions-bases.XXXXXX)"
+printf 'export PRIMARY_WORKTREE=%q\nexport OFFICIAL_MAIN=%q\nexport OFFICIAL_STABLE=%q\nexport PRIMARY_BASE=%q\nexport REDESIGN_BASE=%q\nexport PRIMARY_VERSION=%q\n' \
+  "$PRIMARY_WORKTREE" "$OFFICIAL_MAIN" "$OFFICIAL_STABLE" "$PRIMARY_BASE" "$REDESIGN_BASE" "$PRIMARY_VERSION" > "$BASES_NEXT"
+test -s "$BASES_NEXT"
+mv "$BASES_NEXT" "$TASK15_BASES_ENV"
+
+COMPAT_NEXT="$(mktemp /tmp/comment-mentions-compat.XXXXXX)"
+printf 'export COMPAT=%q\nexport PRIMARY_HEAD=%q\nexport PRIMARY_RUNTIME_HEAD=%q\nexport COMPAT_HEAD=%q\nexport COMPAT_RUNTIME_HEAD=%q\nexport PATCH=%q\nexport PATCH_SHA256=%q\n' \
+  "$COMPAT" "$PRIMARY_RUNTIME_HEAD" "$PRIMARY_RUNTIME_HEAD" "$COMPAT_RUNTIME_HEAD" "$COMPAT_RUNTIME_HEAD" "$PATCH" "$PATCH_SHA256" > "$COMPAT_NEXT"
+test -s "$COMPAT_NEXT"
+mv "$COMPAT_NEXT" "$TASK15_COMPAT_ENV"
+```
+
+For `TASK15_FROZEN=1`, skip export and revalidate the sourced patch/SHA. Never regenerate the patch after apply/backport work begins.
+
+- [ ] **Step 3: Provision tox-owned tools and inspect the stable migration leaf**
+
+```bash
+TOX_ENV=py313-dj52-sqlite-noelasticsearch-customuser-tz
+uvx --python 3.13 --from 'tox>=4,<5' tox -c "$COMPAT/tox.ini" -e "$TOX_ENV" --notest
+TOX_PY="$COMPAT/.tox/$TOX_ENV/bin/python"
+TOX_RUFF="$COMPAT/.tox/$TOX_ENV/bin/ruff"
+test -x "$TOX_PY"
+test -x "$TOX_RUFF"
+"$TOX_PY" --version
+"$TOX_RUFF" --version
+DJANGO_SETTINGS_MODULE=wagtail.test.settings "$TOX_PY" -c 'import django; django.setup(); from django.db import connections; from django.db.migrations.loader import MigrationLoader; print(MigrationLoader(connections["default"], ignore_no_migrations=True).graph.leaf_nodes("wagtailcore"))'
+```
+
+Expected: record the exact one stable `wagtailcore` leaf plus Python, Ruff, Wagtail, and Django versions. Stable has no authoritative `uv.lock`; host bare Python/Ruff is invalid evidence.
+
+Discover the one primary changed migration dynamically:
+
+```bash
+PRIMARY_MIGRATION="$(git -C "$PRIMARY_WORKTREE" diff --name-only "$PRIMARY_BASE" "$PRIMARY_RUNTIME_HEAD" -- 'wagtail/migrations/*_comment_mentions.py')"
+test -n "$PRIMARY_MIGRATION"
+test "$(printf '%s\n' "$PRIMARY_MIGRATION" | wc -l)" = 1
+```
+
+Decide from the recorded graph whether its filename/dependency applies unchanged. If not, record the one adapted compatibility path and exclude the primary migration during apply.
+
+- [ ] **Step 4: Apply with identical fail-fast exclusions or validate the retained commit**
+
+For `COMPAT_RESUME=apply`, use one unchanged exclusion array for check and real indexed 3-way apply:
+
+```bash
+APPLY_EXCLUDES=(
+  --exclude=wagtail/admin/viewsets/pages.py
+  --exclude=wagtail/admin/urls/pages.py
+)
+# Append exactly this only when the recorded stable leaf requires adaptation:
+# APPLY_EXCLUDES+=(--exclude="$PRIMARY_MIGRATION")
+
+git -C "$COMPAT" apply --check --3way --index "${APPLY_EXCLUDES[@]}" "$PATCH"
+git -C "$COMPAT" apply --3way --index "${APPLY_EXCLUDES[@]}" "$PATCH"
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)" = "$PRIMARY_RUNTIME_HEAD"
+test "$(sha256sum "$PATCH" | cut -d' ' -f1)" = "$PATCH_SHA256"
+```
+
+There is no `|| true`, rejected-hunk resolution, reset, or full-patch reapplication. Register the same shared suggestion views directly in 7.4's `wagtail/admin/urls/pages.py`. If migration adaptation is required, use `apply_patch` to create only the new filename/dependency; operation content remains identical.
+
+For `COMPAT_RESUME=verify`, skip every apply/edit/commit action and validate the retained commit, patch SHA, route seam, migration seam, and ancestry before proceeding.
+
+- [ ] **Step 5: Commit one initial retained compatibility commit**
+
+For a new apply only:
+
+```bash
 git -C "$COMPAT" diff --check
 git -C "$COMPAT" status --short
-git -C "$COMPAT" add \
-  wagtail client
+git -C "$COMPAT" add -A -- wagtail client
 git -C "$COMPAT" commit -m "Backport comment mentions to Wagtail 7.4"
-PRIMARY_HEAD=$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)
-COMPAT_HEAD=$(git -C "$COMPAT" rev-parse HEAD)
-
-{
-  printf 'COMPAT=%s\n' "$COMPAT"
-  printf 'PRIMARY_HEAD=%s\n' "$PRIMARY_HEAD"
-  printf 'COMPAT_HEAD=%s\n' "$COMPAT_HEAD"
-} > /tmp/comment-mentions-compat.env
+COMPAT_RUNTIME_HEAD="$(git -C "$COMPAT" rev-parse HEAD)"
+test "$(git -C "$COMPAT" rev-parse HEAD^)" = "$OFFICIAL_STABLE"
 ```
 
-Expected: one retained local backport commit; frontend source is unchanged from the primary feature patch; intentional backend differences are limited to route registration and any recorded migration/test placement seam.
+Expected: one focused local commit. Frontend source/tests are unchanged from primary; intentional backend differences are limited to route registration and a recorded migration filename/dependency or test-location seam.
 
-- [ ] **Step 4: Run the same backend/frontend/browser matrix on 7.4**
-
-Run the same focused backend tests under the compatibility worktree without relying on Task 14's shell state:
+Unless `TASK15_RESUME` is `completed` or `report-handoff`, atomically replace `/tmp/comment-mentions-compat.env` with complete committed-compatibility state. Those two states already carry the persisted report/handoff identities and must not be downgraded. On a verified compatibility-only resume, use the existing exact commit as `COMPAT_RUNTIME_HEAD` and do not create another:
 
 ```bash
-source /tmp/comment-mentions-bases.env
-source /tmp/comment-mentions-compat.env
+if test "$TASK15_RESUME" != completed && test "$TASK15_RESUME" != report-handoff; then
+  test -n "$COMPAT"
+  test -n "$PRIMARY_RUNTIME_HEAD"
+  test -n "$COMPAT_RUNTIME_HEAD"
+  test -n "$OFFICIAL_STABLE"
+  test -n "$PATCH"
+  test -n "$PATCH_SHA256"
+  test "$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)" = "$PRIMARY_RUNTIME_HEAD"
+  test -z "$(git -C "$PRIMARY_WORKTREE" status --short)"
+  test "$(git -C "$COMPAT" rev-parse --show-toplevel)" = "$COMPAT"
+  test "$(git -C "$COMPAT" branch --show-current)" = compat/comment-mentions-7.4
+  test "$(git -C "$COMPAT" rev-parse HEAD)" = "$COMPAT_RUNTIME_HEAD"
+  test "$(git -C "$COMPAT" rev-list --count "$OFFICIAL_STABLE"..HEAD)" = 1
+  test "$(git -C "$COMPAT" rev-parse HEAD^)" = "$OFFICIAL_STABLE"
+  test -z "$(git -C "$COMPAT" status --short)"
+  test -s "$PATCH"
+  test "$(sha256sum "$PATCH" | cut -d' ' -f1)" = "$PATCH_SHA256"
+
+  COMPAT_NEXT="$(mktemp /tmp/comment-mentions-compat.XXXXXX)"
+  printf 'export COMPAT=%q\nexport PRIMARY_HEAD=%q\nexport PRIMARY_RUNTIME_HEAD=%q\nexport COMPAT_HEAD=%q\nexport COMPAT_RUNTIME_HEAD=%q\nexport PATCH=%q\nexport PATCH_SHA256=%q\n' \
+    "$COMPAT" "$PRIMARY_RUNTIME_HEAD" "$PRIMARY_RUNTIME_HEAD" "$COMPAT_RUNTIME_HEAD" "$COMPAT_RUNTIME_HEAD" "$PATCH" "$PATCH_SHA256" > "$COMPAT_NEXT"
+  test -s "$COMPAT_NEXT"
+  mv "$COMPAT_NEXT" "$TASK15_COMPAT_ENV"
+fi
+```
+
+- [ ] **Step 6: Run the complete 7.4 backend/default/UUID matrix**
+
+```bash
 BACKEND_TESTS=(
   wagtail.tests.test_comments
   wagtail.admin.tests.test_comment_mentions
@@ -2312,94 +2653,193 @@ BACKEND_TESTS=(
   wagtail.admin.tests.pages.test_edit_page
   wagtail.admin.tests.test_audit_log
   wagtail.tests.permission_policies.test_page_permission_policies
+  wagtail.admin.tests.test_workflows.TestCommentMentionWorkflows
 )
 
-cd "$COMPAT"
-uvx --from 'tox>=4,<5' tox \
-  -e py313-dj52-sqlite-noelasticsearch-customuser-tz -- "${BACKEND_TESTS[@]}"
-uvx --from 'tox>=4,<5' tox \
-  -e py313-dj60-sqlite-noelasticsearch-customuser-tz -- "${BACKEND_TESTS[@]}"
-uvx --from 'tox>=4,<5' tox \
-  -e py313-dj60-sqlite-noelasticsearch-emailuser-tz -- "${BACKEND_TESTS[@]}"
+uvx --python 3.13 --from 'tox>=4,<5' tox -c "$COMPAT/tox.ini" -e py313-dj52-sqlite-noelasticsearch-customuser-tz -- "${BACKEND_TESTS[@]}"
+uvx --python 3.13 --from 'tox>=4,<5' tox -c "$COMPAT/tox.ini" -e py313-dj60-sqlite-noelasticsearch-customuser-tz -- "${BACKEND_TESTS[@]}"
+uvx --python 3.13 --from 'tox>=4,<5' tox -c "$COMPAT/tox.ini" -e py313-dj60-sqlite-noelasticsearch-emailuser-tz -- "${BACKEND_TESTS[@]}"
+```
 
+Expected: all environments PASS. Record exact Wagtail/Django/Python/user-model versions per environment; the email-user run is the UUID/custom-PK evidence.
+
+- [ ] **Step 7: Run complete compatibility frontend, build, migration, and lint gates**
+
+```bash
+cd "$COMPAT"
 npm ci
-npm run test:unit:coverage -- --runInBand client/src/components/CommentApp
+npm run test:unit:coverage -- --runInBand client/src/components/CommentApp client/src/entrypoints/admin/comments.test.js
 npm run lint:ts
 npm run lint:js
 npm run lint:css
 npm run lint:format
 npm run lint:project
 npm run build
-
-DJANGO_SETTINGS_MODULE=wagtail.test.settings \
-  python -m django makemigrations --check --dry-run
-ruff format --check wagtail/admin wagtail/models/pages.py wagtail/migrations/0098_comment_mentions.py
-ruff check wagtail/admin wagtail/models/pages.py wagtail/migrations/0098_comment_mentions.py
+DJANGO_SETTINGS_MODULE=wagtail.test.settings "$TOX_PY" -m django makemigrations --check --dry-run
+"$TOX_RUFF" format --check wagtail/admin wagtail/models/pages.py wagtail/migrations
+"$TOX_RUFF" check wagtail/admin wagtail/models/pages.py wagtail/migrations
 git diff --check "$OFFICIAL_STABLE"..HEAD
 ```
 
-In one compatibility-worktree terminal, prepare and run the 7.4 UI server:
+Expected: all commands PASS using tox-owned Python/Ruff and the dynamically adapted migration path; no host bare tool result is reported.
+
+- [ ] **Step 8: Rerun Task 13 on one fresh 7.4 server**
+
+In the compatibility worktree:
 
 ```bash
-source /tmp/comment-mentions-compat.env
-cd "$COMPAT"
+export PLAYWRIGHT_BROWSERS_PATH=/tmp/wagtail-comment-mentions-playwright-7.4
 npm --prefix client/tests/integration ci
 npm --prefix client/tests/integration exec -- playwright install chromium
-export DJANGO_SETTINGS_MODULE=wagtail.test.settings_ui
-python ./wagtail/test/manage.py migrate
-python ./wagtail/test/manage.py createcachetable
-DJANGO_SUPERUSER_EMAIL=admin@example.com \
-DJANGO_SUPERUSER_USERNAME=admin \
-DJANGO_SUPERUSER_PASSWORD=changeme \
-python ./wagtail/test/manage.py createsuperuser --noinput
-python ./wagtail/test/manage.py runserver 0:8000
+export WAGTAIL_UI_TEST_DB="$(mktemp --suffix=.sqlite3 /tmp/wagtail-comment-mentions-task15.XXXXXX)"
+export TEST_PORT="$("$TOX_PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+export TEST_ORIGIN="http://127.0.0.1:${TEST_PORT}"
+export COMMENT_MENTIONS_EVIDENCE_DIR=/tmp/wagtail-comment-mentions-compat/7.4
+printf 'export COMPAT=%s\nexport WAGTAIL_UI_TEST_DB=%s\nexport TEST_PORT=%s\nexport TEST_ORIGIN=%s\nexport PLAYWRIGHT_BROWSERS_PATH=%s\nexport COMMENT_MENTIONS_EVIDENCE_DIR=%s\n' "$COMPAT" "$WAGTAIL_UI_TEST_DB" "$TEST_PORT" "$TEST_ORIGIN" "$PLAYWRIGHT_BROWSERS_PATH" "$COMMENT_MENTIONS_EVIDENCE_DIR" > /tmp/comment-mentions-task15-browser.env
+DJANGO_SETTINGS_MODULE=wagtail.test.settings_ui "$TOX_PY" ./wagtail/test/manage.py migrate --noinput
+DJANGO_SETTINGS_MODULE=wagtail.test.settings_ui "$TOX_PY" ./wagtail/test/manage.py createcachetable
+DJANGO_SETTINGS_MODULE=wagtail.test.settings_ui DJANGO_SUPERUSER_EMAIL=admin@example.com DJANGO_SUPERUSER_USERNAME=admin DJANGO_SUPERUSER_PASSWORD=changeme "$TOX_PY" ./wagtail/test/manage.py createsuperuser --noinput
+DJANGO_SETTINGS_MODULE=wagtail.test.settings_ui "$TOX_PY" ./wagtail/test/manage.py runserver "127.0.0.1:${TEST_PORT}" --noreload
 ```
 
-In another compatibility-worktree terminal, run the exact Task 13 scenario against the 7.4 create/edit routes:
+In another terminal:
 
 ```bash
-source /tmp/comment-mentions-compat.env
+source /tmp/comment-mentions-task15-browser.env
 cd "$COMPAT"
-COMMENT_MENTIONS_EVIDENCE_DIR=/tmp/wagtail-comment-mentions-compat/7.4 \
-TEST_ORIGIN=http://127.0.0.1:8000 npm run test:integration -- \
-  --runInBand --runTestsByPath client/tests/integration/comment-mentions.test.js
+until curl -fsS "$TEST_ORIGIN/admin/login/" >/dev/null; do sleep 0.25; done
+COMMENT_MENTIONS_EVIDENCE_DIR="$COMMENT_MENTIONS_EVIDENCE_DIR" TEST_ORIGIN="$TEST_ORIGIN" PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" npm run test:integration -- --runInBand --runTestsByPath client/tests/integration/comment-mentions.test.js
 ```
 
-Expected: all PASS. Any frontend adaptation or non-declared backend adaptation is a primary design defect; correct the primary implementation, commit it, port the incremental diff, and rerun both matrices.
+Expected: Chromium/Axe PASS through both 7.4 create/edit routing seams. The browser proves default `user_id` is an opaque string; UUID remains backend-only. Stop the server and remove the temporary DB afterward. Do not claim a 7.4 Firefox run.
 
-- [ ] **Step 5: Generate reproducible comparison evidence**
+- [ ] **Step 9: Prove adaptation-aware source, migration, route, and history equivalence**
+
+Run:
 
 ```bash
 source /tmp/comment-mentions-bases.env
 source /tmp/comment-mentions-compat.env
-EVIDENCE=/tmp/wagtail-comment-mentions-compat
-mkdir -p "$EVIDENCE"
-
-git -C "$PRIMARY_WORKTREE" diff --binary --full-index --no-renames \
-  --output="$EVIDENCE/primary-runtime.patch" \
-  "$PRIMARY_BASE" "$PRIMARY_HEAD" -- . \
-  ':(exclude)docs/superpowers/**' \
-  ':(exclude)CHANGELOG.txt' \
-  ':(exclude)CONTRIBUTORS.md' \
-  ':(exclude)docs/releases/**'
-
-sha256sum "$EVIDENCE/primary-runtime.patch"
-git -C "$PRIMARY_WORKTREE" range-diff --no-color \
-  "$PRIMARY_BASE..$PRIMARY_HEAD" \
-  "$OFFICIAL_STABLE..$COMPAT_HEAD"
-git -C "$PRIMARY_WORKTREE" diff --name-status "$PRIMARY_BASE" "$PRIMARY_HEAD"
-git -C "$COMPAT" diff --name-status "$OFFICIAL_STABLE" "$COMPAT_HEAD"
-git -C "$PRIMARY_WORKTREE" diff --stat "$PRIMARY_BASE" "$PRIMARY_HEAD"
-git -C "$COMPAT" diff --stat "$OFFICIAL_STABLE" "$COMPAT_HEAD"
-git -C "$PRIMARY_WORKTREE" diff --check "$PRIMARY_BASE" "$PRIMARY_HEAD"
-git -C "$COMPAT" diff --check "$OFFICIAL_STABLE" "$COMPAT_HEAD"
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)" = "$PRIMARY_RUNTIME_HEAD"
+test "$(sha256sum "$PATCH" | cut -d' ' -f1)" = "$PATCH_SHA256"
+git diff --no-index --exit-code "$PRIMARY_WORKTREE/client/src/components/CommentApp" "$COMPAT/client/src/components/CommentApp"
+git diff --no-index --exit-code "$PRIMARY_WORKTREE/client/tests/integration/comment-mentions.test.js" "$COMPAT/client/tests/integration/comment-mentions.test.js"
+git -C "$PRIMARY_WORKTREE" range-diff --no-color "$PRIMARY_BASE..$PRIMARY_RUNTIME_HEAD" "$OFFICIAL_STABLE..$COMPAT_RUNTIME_HEAD"
+git -C "$PRIMARY_WORKTREE" diff --name-status "$PRIMARY_BASE" "$PRIMARY_RUNTIME_HEAD"
+git -C "$COMPAT" diff --name-status "$OFFICIAL_STABLE" "$COMPAT_RUNTIME_HEAD"
+git -C "$PRIMARY_WORKTREE" diff --stat "$PRIMARY_BASE" "$PRIMARY_RUNTIME_HEAD"
+git -C "$COMPAT" diff --stat "$OFFICIAL_STABLE" "$COMPAT_RUNTIME_HEAD"
+git -C "$PRIMARY_WORKTREE" diff --check "$PRIMARY_BASE" "$PRIMARY_RUNTIME_HEAD"
+git -C "$COMPAT" diff --check "$OFFICIAL_STABLE" "$COMPAT_RUNTIME_HEAD"
 ```
 
-`range-diff` is supplementary because the backport is one redesigned net commit. The authoritative report fields are base/head OIDs, patch checksum, full name/status and stat comparison, explicit adaptation table, and command results.
+Generate and compare normalized shared patch IDs with only the declared primary-only/route/migration seams excluded:
 
-- [ ] **Step 6: Write and commit the compatibility report on primary**
+```bash
+EQUIV=/tmp/wagtail-comment-mentions-compat/equivalence
+mkdir -p "$EQUIV"
+COMPAT_MIGRATION="$(git -C "$COMPAT" diff --name-only "$OFFICIAL_STABLE" "$COMPAT_RUNTIME_HEAD" -- 'wagtail/migrations/*_comment_mentions.py')"
+test -n "$COMPAT_MIGRATION"
+PRIMARY_PATHS=(. ':(exclude)docs/superpowers/**' ':(exclude)CHANGELOG.txt' ':(exclude)CONTRIBUTORS.md' ':(exclude)docs/releases/**' ':(exclude)wagtail/admin/viewsets/pages.py' ':(exclude)wagtail/admin/urls/pages.py' ":(exclude)$PRIMARY_MIGRATION")
+COMPAT_PATHS=(. ':(exclude)docs/superpowers/**' ':(exclude)CHANGELOG.txt' ':(exclude)CONTRIBUTORS.md' ':(exclude)docs/releases/**' ':(exclude)wagtail/admin/viewsets/pages.py' ':(exclude)wagtail/admin/urls/pages.py' ":(exclude)$COMPAT_MIGRATION")
+git -C "$PRIMARY_WORKTREE" diff --binary --full-index --no-renames "$PRIMARY_BASE" "$PRIMARY_RUNTIME_HEAD" -- "${PRIMARY_PATHS[@]}" > "$EQUIV/primary-shared.patch"
+git -C "$COMPAT" diff --binary --full-index --no-renames "$OFFICIAL_STABLE" "$COMPAT_RUNTIME_HEAD" -- "${COMPAT_PATHS[@]}" > "$EQUIV/compat-shared.patch"
+PRIMARY_SHARED_PATCH_ID="$(git patch-id --stable < "$EQUIV/primary-shared.patch" | cut -d' ' -f1)"
+COMPAT_SHARED_PATCH_ID="$(git patch-id --stable < "$EQUIV/compat-shared.patch" | cut -d' ' -f1)"
+test -n "$PRIMARY_SHARED_PATCH_ID"
+test "$PRIMARY_SHARED_PATCH_ID" = "$COMPAT_SHARED_PATCH_ID"
+```
 
-The report contains these completed headings with literal values/output summaries, never placeholders:
+Expected: one nonempty identical stable patch ID; differences outside the declared seams are a primary compatibility defect.
+
+Compare migration operations while deliberately omitting only module filename and `Migration.dependencies`:
+
+```bash
+cat > /tmp/comment-mentions-migration-ops.py <<'PY'
+import importlib.util
+import pprint
+import sys
+
+path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("comment_mentions_migration", path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader
+spec.loader.exec_module(module)
+pprint.pp([operation.deconstruct() for operation in module.Migration.operations], sort_dicts=True)
+PY
+PRIMARY_PY="$PRIMARY_WORKTREE/.venv/bin/python"
+(cd "$PRIMARY_WORKTREE" && DJANGO_SETTINGS_MODULE=wagtail.test.settings "$PRIMARY_PY" /tmp/comment-mentions-migration-ops.py "$PRIMARY_WORKTREE/$PRIMARY_MIGRATION") > "$EQUIV/primary-migration-operations.txt"
+(cd "$COMPAT" && DJANGO_SETTINGS_MODULE=wagtail.test.settings "$TOX_PY" /tmp/comment-mentions-migration-ops.py "$COMPAT/$COMPAT_MIGRATION") > "$EQUIV/compat-migration-operations.txt"
+cmp "$EQUIV/primary-migration-operations.txt" "$EQUIV/compat-migration-operations.txt"
+```
+
+Expected: `cmp` exits 0; filename/dependency may differ, but every deconstructed schema/data operation is identical.
+
+Compare literal route pattern/name/view triples:
+
+```bash
+cat > /tmp/comment-mentions-route-triples.py <<'PY'
+import json
+import os
+
+import django
+from django.urls import URLPattern, URLResolver, get_resolver
+
+django.setup()
+
+def walk(patterns, prefix=""):
+    for entry in patterns:
+        pattern = f"{prefix}{entry.pattern}"
+        if isinstance(entry, URLResolver):
+            yield from walk(entry.url_patterns, pattern)
+        elif isinstance(entry, URLPattern) and entry.name and "mention" in entry.name:
+            callback = entry.callback
+            yield (pattern, entry.name, f"{callback.__module__}.{callback.__qualname__}")
+
+for triple in sorted(walk(get_resolver().url_patterns)):
+    print(json.dumps(triple, separators=(",", ":")))
+PY
+(cd "$PRIMARY_WORKTREE" && DJANGO_SETTINGS_MODULE=wagtail.test.settings_ui "$PRIMARY_PY" /tmp/comment-mentions-route-triples.py) > "$EQUIV/primary-routes.jsonl"
+(cd "$COMPAT" && DJANGO_SETTINGS_MODULE=wagtail.test.settings_ui "$TOX_PY" /tmp/comment-mentions-route-triples.py) > "$EQUIV/compat-routes.jsonl"
+test "$(wc -l < "$EQUIV/primary-routes.jsonl")" = 2
+test "$(wc -l < "$EQUIV/compat-routes.jsonl")" = 2
+cmp "$EQUIV/primary-routes.jsonl" "$EQUIV/compat-routes.jsonl"
+```
+
+Expected: exactly two byte-identical suggestion route triples.
+
+Write the literal adaptation table from the validated paths/leaf decisions:
+
+```bash
+ADAPTATIONS="$EQUIV/adaptations.md"
+printf '| Area | Primary | Wagtail 7.4 | Reason |\n|---|---|---|---|\n| Suggestion routes | wagtail/admin/viewsets/pages.py | wagtail/admin/urls/pages.py | Declared 8.0 viewset versus 7.4 direct-URL seam |\n| Migration | %s | %s | Filename/dependency only; operations compare byte-identical |\n' "$PRIMARY_MIGRATION" "$COMPAT_MIGRATION" > "$ADAPTATIONS"
+test -s "$ADAPTATIONS"
+test "$(rg -c '^\| (Suggestion routes|Migration) \|' "$ADAPTATIONS")" = 2
+```
+
+Expected: exactly the two literal declared adaptations. Any additional source/test difference fails the gate and must be corrected on primary or explicitly approved before the table/report changes. `range-diff` remains supplementary.
+
+- [ ] **Step 10: Write and commit the provisional compatibility report on primary**
+
+All fresh and resume paths use the same report identity:
+
+```bash
+REPORT=docs/superpowers/compatibility/2026-07-09-comment-mentions-7.4.md
+```
+
+For `TASK15_RESUME=completed`, skip every write/commit below. Validate the existing report is the only path between `PRIMARY_RUNTIME_HEAD` and `PRIMARY_REPORT_HEAD`, contains the recorded frozen heads/SHA/results, and proceed to Step 11.
+
+For `TASK15_RESUME=report-handoff`, skip report creation and commit, validate that the current exact `PRIMARY_REPORT_HEAD` has parent `PRIMARY_RUNTIME_HEAD` and changes only the report path, then continue at the atomic report/handoff writer below.
+
+For fresh/partial/verification runs without `PRIMARY_REPORT_HEAD`, continue through report creation and commit:
+
+Create the report directory if this is the first compatibility report:
+
+```bash
+mkdir -p "$PRIMARY_WORKTREE/docs/superpowers/compatibility"
+```
+
+Create `docs/superpowers/compatibility/2026-07-09-comment-mentions-7.4.md` with literal values/results under:
 
 ```markdown
 # Comment mentions: Wagtail 7.4 compatibility
@@ -2417,65 +2857,333 @@ The report contains these completed headings with literal values/output summarie
 ## Conclusion
 ```
 
-Use `apply_patch` to create the report, then:
+Record `PRIMARY_RUNTIME_HEAD`, `COMPAT_RUNTIME_HEAD`, both bases, exact versions, patch SHA, tools, commands/results, source/migration/route comparisons, and local-retention proof. If primary VERSION is alpha, label primary rows/conclusion provisional and state Task 16 must replace them; do not fabricate beta values or leave placeholders. Firefox is primary-only evidence.
 
 ```bash
-source /tmp/comment-mentions-bases.env
-git -C "$PRIMARY_WORKTREE" add docs/superpowers/compatibility/2026-07-09-comment-mentions-7.4.md
+git -C "$PRIMARY_WORKTREE" add "$REPORT"
+test "$(git -C "$PRIMARY_WORKTREE" diff --cached --name-only)" = "$REPORT"
 git -C "$PRIMARY_WORKTREE" commit -m "Document Wagtail 7.4 mention compatibility"
+PRIMARY_REPORT_HEAD="$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)"
+test "$(git -C "$PRIMARY_WORKTREE" diff --name-only "$PRIMARY_RUNTIME_HEAD" "$PRIMARY_REPORT_HEAD")" = "$REPORT"
 ```
 
-- [ ] **Step 7: Audit the completed 7.4 proof**
+Freeze the report/handoff state by atomically replacing `/tmp/comment-mentions-compat.env` with every value later sourced. `PRIMARY_HEAD` remains the tested runtime head; the report and handoff aliases identify only the later report commit:
 
-Source both `/tmp/comment-mentions-bases.env` and `/tmp/comment-mentions-compat.env`, then re-run `git status`, primary/compat OIDs, full required matrix evidence, and changed-file/history lists. Confirm the compatibility branch remains local and retained, and record whether `PRIMARY_VERSION` is provisional alpha or beta-or-later. Do not publish yet; Task 16 is the final two-release gate.
+```bash
+PRIMARY_HANDOFF_HEAD="$PRIMARY_REPORT_HEAD"
+test -n "$COMPAT"
+test -n "$PRIMARY_RUNTIME_HEAD"
+test -n "$PRIMARY_REPORT_HEAD"
+test -n "$PRIMARY_HANDOFF_HEAD"
+test -n "$COMPAT_RUNTIME_HEAD"
+test -n "$OFFICIAL_STABLE"
+test -n "$PATCH"
+test -n "$PATCH_SHA256"
+test "$PRIMARY_HANDOFF_HEAD" = "$PRIMARY_REPORT_HEAD"
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)" = "$PRIMARY_REPORT_HEAD"
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse "$PRIMARY_REPORT_HEAD^")" = "$PRIMARY_RUNTIME_HEAD"
+test "$(git -C "$PRIMARY_WORKTREE" diff --name-only "$PRIMARY_RUNTIME_HEAD" "$PRIMARY_REPORT_HEAD")" = "$REPORT"
+test -z "$(git -C "$PRIMARY_WORKTREE" status --short)"
+test "$(git -C "$COMPAT" rev-parse --show-toplevel)" = "$COMPAT"
+test "$(git -C "$COMPAT" branch --show-current)" = compat/comment-mentions-7.4
+test "$(git -C "$COMPAT" rev-parse HEAD)" = "$COMPAT_RUNTIME_HEAD"
+test "$(git -C "$COMPAT" rev-list --count "$OFFICIAL_STABLE"..HEAD)" = 1
+test "$(git -C "$COMPAT" rev-parse HEAD^)" = "$OFFICIAL_STABLE"
+test -z "$(git -C "$COMPAT" status --short)"
+test -s "$PATCH"
+test "$(sha256sum "$PATCH" | cut -d' ' -f1)" = "$PATCH_SHA256"
+
+COMPAT_NEXT="$(mktemp /tmp/comment-mentions-compat.XXXXXX)"
+printf 'export COMPAT=%q\nexport PRIMARY_HEAD=%q\nexport PRIMARY_RUNTIME_HEAD=%q\nexport PRIMARY_REPORT_HEAD=%q\nexport PRIMARY_HANDOFF_HEAD=%q\nexport COMPAT_HEAD=%q\nexport COMPAT_RUNTIME_HEAD=%q\nexport PATCH=%q\nexport PATCH_SHA256=%q\n' \
+  "$COMPAT" "$PRIMARY_RUNTIME_HEAD" "$PRIMARY_RUNTIME_HEAD" "$PRIMARY_REPORT_HEAD" "$PRIMARY_HANDOFF_HEAD" "$COMPAT_RUNTIME_HEAD" "$COMPAT_RUNTIME_HEAD" "$PATCH" "$PATCH_SHA256" > "$COMPAT_NEXT"
+test -s "$COMPAT_NEXT"
+mv "$COMPAT_NEXT" "$TASK15_COMPAT_ENV"
+```
+
+Expected: the runtime head/checksum remain distinct from the later report-only head; the report is complete but provisional while primary is alpha.
+
+- [ ] **Step 11: Audit retained local-only handoff and stop publication**
+
+```bash
+test -s "$TASK15_BASES_ENV"
+test -s "$TASK15_COMPAT_ENV"
+source "$TASK15_BASES_ENV"
+source "$TASK15_COMPAT_ENV"
+test -n "$PRIMARY_RUNTIME_HEAD"
+test -n "$PRIMARY_REPORT_HEAD"
+test -n "$PRIMARY_HANDOFF_HEAD"
+test -n "$COMPAT_RUNTIME_HEAD"
+test "$PRIMARY_HEAD" = "$PRIMARY_RUNTIME_HEAD"
+test "$PRIMARY_HANDOFF_HEAD" = "$PRIMARY_REPORT_HEAD"
+test "$COMPAT_HEAD" = "$COMPAT_RUNTIME_HEAD"
+test "$(git -C "$COMPAT" rev-parse HEAD^)" = "$OFFICIAL_STABLE"
+test "$(git -C "$COMPAT" rev-parse HEAD)" = "$COMPAT_RUNTIME_HEAD"
+test -z "$(git -C "$COMPAT" status --short)"
+test -z "$(git -C "$COMPAT" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"
+test -z "$(git -C "$PRIMARY_WORKTREE" for-each-ref --format='%(refname)' refs/remotes | rg '/compat/comment-mentions-7\.4$')"
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)" = "$PRIMARY_REPORT_HEAD"
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD^)" = "$PRIMARY_RUNTIME_HEAD"
+test -z "$(git -C "$PRIMARY_WORKTREE" status --short)"
+git -C "$PRIMARY_WORKTREE" status --short --branch
+```
+
+Expected: exact stable ancestry, one clean retained compatibility commit, no upstream/remote compatibility branch, clean primary report head, validated `/tmp` state, and no publication. Task 16 owns all beta-or-later and publication claims.
 
 ---
 
-### Task 16: Wagtail 8.0 Beta-or-Later Release Gate
+### Task 16: Wagtail 8.0 Release Checkpoint and Re-plan Gate
 
 **Files:**
-- Modify if OIDs or results changed: `docs/superpowers/compatibility/2026-07-09-comment-mentions-7.4.md`.
-- Modify only after user authorization: the existing PR 1 title/body on GitHub.
+- Modify no tracked files while this checkpoint is pending or requests a re-plan.
+- Create outside git only: `/tmp/comment-mentions-task16-pending.env`.
+- Only a future, independently reviewed plan may authorize changes to the compatibility report or runtime sources.
 
 **Interfaces:**
-- Consumes: the complete primary implementation, retained 7.4 proof, freshly fetched official `main`, and Wagtail's actual `VERSION` tuple.
-- Produces: final evidence that the feature works on both Wagtail 7.4 and Wagtail 8.0 beta-or-later; alpha-only evidence cannot satisfy this task.
+- Consumes: clean, completed Task 14/15 evidence; the exact recorded primary runtime/report/handoff and retained compatibility heads; freshly queried official `main`, `stable/7.4.x`, and immutable `refs/tags/v8.0*`.
+- Produces: one validated `/tmp/comment-mentions-task16-pending.env` observation with exact OIDs, parsed versions, tag refs/OIDs, timestamp, and either `PENDING_OFFICIAL_8_RELEASE` or `REPLAN_REQUIRED`.
+- Current status: externally blocked while official `main` remains Wagtail 8.0 alpha. This checkpoint makes no compatibility, support, integration, or publication claim.
 
-- [ ] **Step 1: Refresh official main and enforce the 8.0 release-stage gate**
+- [ ] **Step 1: Validate the completed Task 15 handoff before network access**
 
-Run with network approval:
+Run before any network action:
 
 ```bash
-source /tmp/comment-mentions-bases.env
-git -C "$PRIMARY_WORKTREE" fetch --no-tags https://github.com/wagtail/wagtail.git \
-  +refs/heads/main:refs/remotes/upstream/main
+TASK16_BASES_ENV=/tmp/comment-mentions-bases.env
+TASK16_COMPAT_ENV=/tmp/comment-mentions-compat.env
+TASK16_CHECKPOINT=/tmp/comment-mentions-task16-pending.env
+test -s "$TASK16_BASES_ENV"
+test -s "$TASK16_COMPAT_ENV"
+source "$TASK16_BASES_ENV"
+source "$TASK16_COMPAT_ENV"
 
-OFFICIAL_MAIN=$(git -C "$PRIMARY_WORKTREE" rev-parse refs/remotes/upstream/main)
-PRIMARY_BASE=$(git -C "$PRIMARY_WORKTREE" merge-base "$OFFICIAL_MAIN" HEAD)
-PRIMARY_VERSION=$(python -c 'import wagtail; print(wagtail.__version__)')
-printf '%s\n' "$OFFICIAL_MAIN" "$PRIMARY_BASE" "$PRIMARY_VERSION"
+for required in \
+  PRIMARY_WORKTREE OFFICIAL_MAIN OFFICIAL_STABLE PRIMARY_BASE REDESIGN_BASE \
+  PRIMARY_VERSION COMPAT PRIMARY_HEAD PRIMARY_RUNTIME_HEAD PRIMARY_REPORT_HEAD \
+  PRIMARY_HANDOFF_HEAD COMPAT_HEAD COMPAT_RUNTIME_HEAD PATCH PATCH_SHA256
+do
+  test -n "${!required}"
+done
 
-test "$PRIMARY_BASE" = "$OFFICIAL_MAIN"
-python -c 'from wagtail import VERSION; assert VERSION[:3] == (8, 0, 0); assert VERSION[3] in {"beta", "rc", "final"}'
+test "$PRIMARY_HEAD" = "$PRIMARY_RUNTIME_HEAD"
+test "$PRIMARY_HANDOFF_HEAD" = "$PRIMARY_REPORT_HEAD"
+test "$COMPAT_HEAD" = "$COMPAT_RUNTIME_HEAD"
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse --show-toplevel)" = "$PRIMARY_WORKTREE"
+test "$(git -C "$PRIMARY_WORKTREE" branch --show-current)" = worktree/comment-mentions
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)" = "$PRIMARY_REPORT_HEAD"
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse "$PRIMARY_REPORT_HEAD^")" = "$PRIMARY_RUNTIME_HEAD"
+test "$(git -C "$PRIMARY_WORKTREE" merge-base "$PRIMARY_BASE" "$PRIMARY_RUNTIME_HEAD")" = "$PRIMARY_BASE"
+test "$(git -C "$PRIMARY_WORKTREE" diff --name-only "$PRIMARY_RUNTIME_HEAD" "$PRIMARY_REPORT_HEAD")" = docs/superpowers/compatibility/2026-07-09-comment-mentions-7.4.md
+test -z "$(git -C "$PRIMARY_WORKTREE" status --short)"
 
-{
-  printf 'PRIMARY_WORKTREE=%s\n' "$PRIMARY_WORKTREE"
-  printf 'OFFICIAL_MAIN=%s\n' "$OFFICIAL_MAIN"
-  printf 'OFFICIAL_STABLE=%s\n' "$OFFICIAL_STABLE"
-  printf 'PRIMARY_BASE=%s\n' "$PRIMARY_BASE"
-  printf 'REDESIGN_BASE=%s\n' "$REDESIGN_BASE"
-  printf 'PRIMARY_VERSION=%s\n' "$PRIMARY_VERSION"
-} > /tmp/comment-mentions-bases.env
+test "$(git -C "$COMPAT" rev-parse --show-toplevel)" = "$COMPAT"
+test "$(git -C "$COMPAT" branch --show-current)" = compat/comment-mentions-7.4
+test "$(git -C "$COMPAT" rev-parse HEAD)" = "$COMPAT_RUNTIME_HEAD"
+test "$(git -C "$COMPAT" rev-list --count "$OFFICIAL_STABLE"..HEAD)" = 1
+test "$(git -C "$COMPAT" rev-parse HEAD^)" = "$OFFICIAL_STABLE"
+test -z "$(git -C "$COMPAT" status --short)"
+test -z "$(git -C "$COMPAT" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"
+test -z "$(git -C "$PRIMARY_WORKTREE" for-each-ref --format='%(refname)' refs/remotes | rg '/compat/comment-mentions-7\.4$')"
+
+test -s "$PATCH"
+test "$(sha256sum "$PATCH" | cut -d' ' -f1)" = "$PATCH_SHA256"
+PRIMARY_HEAD_BEFORE="$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)"
+COMPAT_HEAD_BEFORE="$(git -C "$COMPAT" rev-parse HEAD)"
+PRIMARY_BRANCH_BEFORE="$(git -C "$PRIMARY_WORKTREE" branch --show-current)"
+COMPAT_BRANCH_BEFORE="$(git -C "$COMPAT" branch --show-current)"
 ```
 
-Expected: the primary branch is based on the freshly fetched official `main`, and its version is 8.0 beta, release candidate, or final. If official `main` or the feature branch still reports alpha, record the gate as pending and stop only completion/publication; implementation work and provisional tests may continue. If `main` advanced, obtain user approval before rebuilding/rebasing the existing PR branch, then continue with the refreshed branch rather than opening a replacement PR.
+Expected: both paths, branches, heads, exact report/runtime and compatibility parents, clean worktrees, frozen patch, aliases, and local-only compatibility state match Task 15. Any mismatch is a hard stop before network access.
 
-- [ ] **Step 2: Repeat both release-line proofs after the 8.0 refresh**
+- [ ] **Step 2: Query official refs, parse fetched VERSION tuples, and record the observation atomically**
 
-Rerun every Task 14 backend, frontend, migration, Chromium/Axe, Firefox, diff, and history command on the beta-or-later primary branch. Because a primary rebase changes source OIDs and the exported runtime patch, generate the fresh Task 15 patch/checksum and compare it with the retained 7.4 implementation. Do not apply the full patch over the existing backport. If feature behavior changed, hand-port only the incremental mention changes as a new compatibility commit; otherwise leave its code commit unchanged. Then rerun Task 15 Steps 4-7, refresh `PRIMARY_HEAD` / `COMPAT_HEAD`, update the report's versions, OIDs, checksum, comparisons, and results, and verify that the declared adaptation set remains unchanged.
+Fetch only remote-tracking refs, query immutable tag refs, and parse `VERSION` from the fetched branch Git objects with the primary checked-in environment:
 
-Expected: the full matrix passes on exact recorded Wagtail 8.0 beta-or-later and Wagtail 7.4 OIDs, not merely on an earlier alpha snapshot.
+```bash
+REMOTE=https://github.com/wagtail/wagtail.git
+PRIMARY_PY="$PRIMARY_WORKTREE/.venv/bin/python"
+test -x "$PRIMARY_PY"
 
-- [ ] **Step 3: Final two-release completion and publication audit**
+if ! git -C "$PRIMARY_WORKTREE" fetch --no-tags "$REMOTE" \
+  +refs/heads/main:refs/remotes/upstream/main \
+  +refs/heads/stable/7.4.x:refs/remotes/upstream/stable/7.4.x
+then
+  printf '%s\n' 'HARD STOP: official branch query failed' >&2
+  exit 1
+fi
 
-Check the seven design-spec acceptance criteria one by one, including exact version strings/OIDs, both browser runs, migration equivalence, compatibility diff evidence, focused history, PR template, screenshots, and AI disclosure. Confirm both worktrees are clean and the 7.4 branch remains local. Only after separate user authorization: push the primary branch, update the existing PR 1 title/body from the verified evidence, verify its remote head/body/checks, and leave it draft until human review occurs.
+TAG_REFS_FILE="$(mktemp /tmp/comment-mentions-task16-tags.XXXXXX)"
+if ! git ls-remote --tags --refs "$REMOTE" 'refs/tags/v8.0*' > "$TAG_REFS_FILE"; then
+  printf '%s\n' 'HARD STOP: official tag query failed' >&2
+  exit 1
+fi
+
+OBSERVED_OFFICIAL_MAIN="$(git -C "$PRIMARY_WORKTREE" rev-parse refs/remotes/upstream/main)"
+OBSERVED_OFFICIAL_STABLE="$(git -C "$PRIMARY_WORKTREE" rev-parse refs/remotes/upstream/stable/7.4.x)"
+MAIN_VERSION_SOURCE="$(mktemp /tmp/comment-mentions-task16-main-version.XXXXXX)"
+STABLE_VERSION_SOURCE="$(mktemp /tmp/comment-mentions-task16-stable-version.XXXXXX)"
+if ! git -C "$PRIMARY_WORKTREE" show "$OBSERVED_OFFICIAL_MAIN:wagtail/__init__.py" > "$MAIN_VERSION_SOURCE"; then
+  printf '%s\n' 'HARD STOP: fetched main VERSION provenance failed' >&2
+  exit 1
+fi
+if ! git -C "$PRIMARY_WORKTREE" show "$OBSERVED_OFFICIAL_STABLE:wagtail/__init__.py" > "$STABLE_VERSION_SOURCE"; then
+  printf '%s\n' 'HARD STOP: fetched stable VERSION provenance failed' >&2
+  exit 1
+fi
+
+VERSION_AST='import ast, pathlib, sys; tree = ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")); matches = [n for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "VERSION" for t in n.targets)]; assert len(matches) == 1; value = ast.literal_eval(matches[0].value); assert isinstance(value, tuple) and len(value) == 5; assert value[:3] == tuple(map(int, value[:3])); assert value[3] in {"alpha", "beta", "rc", "final"}; assert isinstance(value[4], int) and value[4] >= 0; print(repr(value))'
+if ! OBSERVED_OFFICIAL_MAIN_VERSION="$("$PRIMARY_PY" -c "$VERSION_AST" "$MAIN_VERSION_SOURCE")"; then
+  printf '%s\n' 'HARD STOP: fetched main VERSION parser failed' >&2
+  exit 1
+fi
+if ! OBSERVED_OFFICIAL_STABLE_VERSION="$("$PRIMARY_PY" -c "$VERSION_AST" "$STABLE_VERSION_SOURCE")"; then
+  printf '%s\n' 'HARD STOP: fetched stable VERSION parser failed' >&2
+  exit 1
+fi
+if ! OBSERVED_OFFICIAL_MAIN_VERSION="$OBSERVED_OFFICIAL_MAIN_VERSION" OBSERVED_OFFICIAL_STABLE_VERSION="$OBSERVED_OFFICIAL_STABLE_VERSION" "$PRIMARY_PY" -c 'import ast, os; ast.literal_eval(os.environ["OBSERVED_OFFICIAL_MAIN_VERSION"]); stable = ast.literal_eval(os.environ["OBSERVED_OFFICIAL_STABLE_VERSION"]); assert stable[:2] == (7, 4) and stable[3] == "final"'; then
+  printf '%s\n' 'HARD STOP: official branch VERSION provenance is outside the checkpoint contract' >&2
+  exit 1
+fi
+
+if ! ELIGIBLE_8_RELEASE_REFS_OIDS="$("$PRIMARY_PY" - "$TAG_REFS_FILE" <<'PY'
+import pathlib
+import re
+import sys
+
+oid_pattern = re.compile(r"^[0-9a-f]{40,64}$")
+eligible_pattern = re.compile(r"^refs/tags/v8\.0(?:(?:b|rc)[1-9][0-9]*|)$")
+seen = set()
+eligible = []
+for number, line in enumerate(
+    pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines(), 1
+):
+    parts = line.split()
+    if len(parts) != 2:
+        raise SystemExit(f"invalid ls-remote line {number}")
+    oid, ref = parts
+    if not oid_pattern.fullmatch(oid) or not ref.startswith("refs/tags/v8.0"):
+        raise SystemExit(f"invalid 8.0 tag provenance at line {number}")
+    if ref in seen:
+        raise SystemExit(f"duplicate 8.0 tag ref: {ref}")
+    seen.add(ref)
+    if eligible_pattern.fullmatch(ref):
+        eligible.append(f"{oid}\t{ref}")
+print("\n".join(sorted(eligible)))
+PY
+)"; then
+  printf '%s\n' 'HARD STOP: official tag provenance parser failed' >&2
+  exit 1
+fi
+ALL_8_TAG_REFS_OIDS="$(cat "$TAG_REFS_FILE")"
+CHECKED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+test -n "$OBSERVED_OFFICIAL_MAIN"
+test -n "$OBSERVED_OFFICIAL_STABLE"
+test -n "$OBSERVED_OFFICIAL_MAIN_VERSION"
+test -n "$OBSERVED_OFFICIAL_STABLE_VERSION"
+test -n "$CHECKED_AT"
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)" = "$PRIMARY_HEAD_BEFORE"
+test "$(git -C "$COMPAT" rev-parse HEAD)" = "$COMPAT_HEAD_BEFORE"
+test "$(git -C "$PRIMARY_WORKTREE" branch --show-current)" = "$PRIMARY_BRANCH_BEFORE"
+test "$(git -C "$COMPAT" branch --show-current)" = "$COMPAT_BRANCH_BEFORE"
+test -z "$(git -C "$PRIMARY_WORKTREE" status --short)"
+test -z "$(git -C "$COMPAT" status --short)"
+
+STATUS=OBSERVED_OFFICIAL_8_STATE
+REASON='official refs recorded; release decision not yet applied'
+CHECKPOINT_NEXT="$(mktemp /tmp/comment-mentions-task16-pending.XXXXXX)"
+printf 'export STATUS=%q\nexport REASON=%q\nexport PRIMARY_WORKTREE=%q\nexport PRIMARY_BRANCH=%q\nexport COMPAT=%q\nexport COMPAT_BRANCH=%q\nexport RECORDED_OFFICIAL_MAIN=%q\nexport RECORDED_OFFICIAL_STABLE=%q\nexport PRIMARY_BASE=%q\nexport REDESIGN_BASE=%q\nexport RECORDED_PRIMARY_VERSION=%q\nexport PRIMARY_RUNTIME_HEAD=%q\nexport PRIMARY_REPORT_HEAD=%q\nexport PRIMARY_HANDOFF_HEAD=%q\nexport COMPAT_RUNTIME_HEAD=%q\nexport PATCH=%q\nexport PATCH_SHA256=%q\nexport OBSERVED_OFFICIAL_MAIN=%q\nexport OBSERVED_OFFICIAL_MAIN_VERSION=%q\nexport OBSERVED_OFFICIAL_STABLE=%q\nexport OBSERVED_OFFICIAL_STABLE_VERSION=%q\nexport ALL_8_TAG_REFS_OIDS=%q\nexport ELIGIBLE_8_RELEASE_REFS_OIDS=%q\nexport CHECKED_AT=%q\n' \
+  "$STATUS" "$REASON" "$PRIMARY_WORKTREE" "$PRIMARY_BRANCH_BEFORE" "$COMPAT" "$COMPAT_BRANCH_BEFORE" \
+  "$OFFICIAL_MAIN" "$OFFICIAL_STABLE" "$PRIMARY_BASE" "$REDESIGN_BASE" "$PRIMARY_VERSION" \
+  "$PRIMARY_RUNTIME_HEAD" "$PRIMARY_REPORT_HEAD" \
+  "$PRIMARY_HANDOFF_HEAD" "$COMPAT_RUNTIME_HEAD" "$PATCH" "$PATCH_SHA256" \
+  "$OBSERVED_OFFICIAL_MAIN" "$OBSERVED_OFFICIAL_MAIN_VERSION" "$OBSERVED_OFFICIAL_STABLE" \
+  "$OBSERVED_OFFICIAL_STABLE_VERSION" "$ALL_8_TAG_REFS_OIDS" "$ELIGIBLE_8_RELEASE_REFS_OIDS" \
+  "$CHECKED_AT" > "$CHECKPOINT_NEXT"
+test -s "$CHECKPOINT_NEXT"
+( source "$CHECKPOINT_NEXT" && test "$STATUS" = OBSERVED_OFFICIAL_8_STATE && test -n "$OBSERVED_OFFICIAL_MAIN" && test -n "$OBSERVED_OFFICIAL_STABLE" && test -n "$CHECKED_AT" )
+mv "$CHECKPOINT_NEXT" "$TASK16_CHECKPOINT"
+```
+
+Expected: command, parser, malformed-ref, wrong-release-line, or Git-object provenance failures exit nonzero and do not masquerade as a pending release. A valid query with no eligible beta/RC/final ref is recorded successfully with an empty `ELIGIBLE_8_RELEASE_REFS_OIDS`.
+
+- [ ] **Step 3: Classify the official release state without mutating tracked or Git history state**
+
+Source and validate the complete observation, then atomically replace it with the checkpoint decision:
+
+```bash
+TASK16_CHECKPOINT=/tmp/comment-mentions-task16-pending.env
+source "$TASK16_CHECKPOINT"
+for required in \
+  PRIMARY_WORKTREE PRIMARY_BRANCH COMPAT COMPAT_BRANCH RECORDED_OFFICIAL_MAIN \
+  RECORDED_OFFICIAL_STABLE PRIMARY_BASE REDESIGN_BASE RECORDED_PRIMARY_VERSION \
+  PRIMARY_RUNTIME_HEAD PRIMARY_REPORT_HEAD \
+  PRIMARY_HANDOFF_HEAD COMPAT_RUNTIME_HEAD PATCH PATCH_SHA256 \
+  OBSERVED_OFFICIAL_MAIN OBSERVED_OFFICIAL_MAIN_VERSION OBSERVED_OFFICIAL_STABLE \
+  OBSERVED_OFFICIAL_STABLE_VERSION CHECKED_AT
+do
+  test -n "${!required}"
+done
+test "$STATUS" = OBSERVED_OFFICIAL_8_STATE
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)" = "$PRIMARY_REPORT_HEAD"
+test "$(git -C "$COMPAT" rev-parse HEAD)" = "$COMPAT_RUNTIME_HEAD"
+test -z "$(git -C "$PRIMARY_WORKTREE" status --short)"
+test -z "$(git -C "$COMPAT" status --short)"
+
+if ! MAIN_IS_8_ALPHA="$(
+  OBSERVED_OFFICIAL_MAIN_VERSION="$OBSERVED_OFFICIAL_MAIN_VERSION" "$PRIMARY_WORKTREE/.venv/bin/python" -c 'import ast, os; value = ast.literal_eval(os.environ["OBSERVED_OFFICIAL_MAIN_VERSION"]); print("yes" if value[:4] == (8, 0, 0, "alpha") and isinstance(value[4], int) else "no")'
+)"; then
+  printf '%s\n' 'HARD STOP: checkpoint VERSION decision parser failed' >&2
+  exit 1
+fi
+test "$MAIN_IS_8_ALPHA" = yes || test "$MAIN_IS_8_ALPHA" = no
+if test "$MAIN_IS_8_ALPHA" = yes && test -z "$ELIGIBLE_8_RELEASE_REFS_OIDS"; then
+  STATUS=PENDING_OFFICIAL_8_RELEASE
+  REASON='official main remains 8.0 alpha and no immutable 8.0 beta, RC, or final tag exists'
+else
+  STATUS=REPLAN_REQUIRED
+  REASON='official main or immutable 8.0 release refs changed; a newly reviewed integration plan is required'
+fi
+
+CHECKPOINT_NEXT="$(mktemp /tmp/comment-mentions-task16-pending.XXXXXX)"
+printf 'export STATUS=%q\nexport REASON=%q\nexport PRIMARY_WORKTREE=%q\nexport PRIMARY_BRANCH=%q\nexport COMPAT=%q\nexport COMPAT_BRANCH=%q\nexport RECORDED_OFFICIAL_MAIN=%q\nexport RECORDED_OFFICIAL_STABLE=%q\nexport PRIMARY_BASE=%q\nexport REDESIGN_BASE=%q\nexport RECORDED_PRIMARY_VERSION=%q\nexport PRIMARY_RUNTIME_HEAD=%q\nexport PRIMARY_REPORT_HEAD=%q\nexport PRIMARY_HANDOFF_HEAD=%q\nexport COMPAT_RUNTIME_HEAD=%q\nexport PATCH=%q\nexport PATCH_SHA256=%q\nexport OBSERVED_OFFICIAL_MAIN=%q\nexport OBSERVED_OFFICIAL_MAIN_VERSION=%q\nexport OBSERVED_OFFICIAL_STABLE=%q\nexport OBSERVED_OFFICIAL_STABLE_VERSION=%q\nexport ALL_8_TAG_REFS_OIDS=%q\nexport ELIGIBLE_8_RELEASE_REFS_OIDS=%q\nexport CHECKED_AT=%q\n' \
+  "$STATUS" "$REASON" "$PRIMARY_WORKTREE" "$PRIMARY_BRANCH" "$COMPAT" "$COMPAT_BRANCH" \
+  "$RECORDED_OFFICIAL_MAIN" "$RECORDED_OFFICIAL_STABLE" "$PRIMARY_BASE" "$REDESIGN_BASE" \
+  "$RECORDED_PRIMARY_VERSION" "$PRIMARY_RUNTIME_HEAD" \
+  "$PRIMARY_REPORT_HEAD" "$PRIMARY_HANDOFF_HEAD" "$COMPAT_RUNTIME_HEAD" "$PATCH" "$PATCH_SHA256" \
+  "$OBSERVED_OFFICIAL_MAIN" "$OBSERVED_OFFICIAL_MAIN_VERSION" "$OBSERVED_OFFICIAL_STABLE" \
+  "$OBSERVED_OFFICIAL_STABLE_VERSION" "$ALL_8_TAG_REFS_OIDS" "$ELIGIBLE_8_RELEASE_REFS_OIDS" \
+  "$CHECKED_AT" > "$CHECKPOINT_NEXT"
+test -s "$CHECKPOINT_NEXT"
+( source "$CHECKPOINT_NEXT" && test "$STATUS" = PENDING_OFFICIAL_8_RELEASE || test "$STATUS" = REPLAN_REQUIRED )
+mv "$CHECKPOINT_NEXT" "$TASK16_CHECKPOINT"
+
+if test "$STATUS" = PENDING_OFFICIAL_8_RELEASE; then
+  printf '%s\n' 'BLOCKED: waiting on official Wagtail 8.0 beta, RC, or final release state'
+else
+  printf '%s\n' 'STOP: official release state changed; re-plan before any mutation'
+fi
+exit 0
+```
+
+Expected: exactly alpha plus an empty eligible-release set yields `PENDING_OFFICIAL_8_RELEASE`, reports an external-state block, changes no tracked file or Git history, and stops successfully. Any main state beyond that exact alpha tuple, or any immutable 8.0 beta/RC/final ref, yields `REPLAN_REQUIRED` with the observed refs preserved and stops before mutation.
+
+- [ ] **Step 4: Require a new independently reviewed execution plan**
+
+The user/controller must create and independently review a fresh plan before any primary/compatibility integration. That future plan must separately authorize and define integration, complete 8.0 and 7.4 reruns, compatibility-report refresh, and any later publication. Task 16 remains incomplete until that future plan executes; this checkpoint makes no support or publication claim.
+
+**Verification:**
+
+```bash
+source /tmp/comment-mentions-task16-pending.env
+test "$STATUS" = PENDING_OFFICIAL_8_RELEASE || test "$STATUS" = REPLAN_REQUIRED
+test "$(git -C "$PRIMARY_WORKTREE" rev-parse HEAD)" = "$PRIMARY_REPORT_HEAD"
+test "$(git -C "$COMPAT" rev-parse HEAD)" = "$COMPAT_RUNTIME_HEAD"
+test "$(git -C "$COMPAT" rev-list --count "$RECORDED_OFFICIAL_STABLE"..HEAD)" = 1
+test "$(git -C "$COMPAT" rev-parse HEAD^)" = "$RECORDED_OFFICIAL_STABLE"
+test -z "$(git -C "$PRIMARY_WORKTREE" status --short)"
+test -z "$(git -C "$COMPAT" status --short)"
+test -z "$(git -C "$COMPAT" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"
+test -z "$(git -C "$PRIMARY_WORKTREE" for-each-ref --format='%(refname)' refs/remotes | rg '/compat/comment-mentions-7\.4$')"
+test -s /tmp/comment-mentions-task16-pending.env
+```
+
+Expected: primary and compatibility heads, branches, parents, and clean states are unchanged; compatibility remains exactly one local commit with no upstream or remote branch; the checkpoint is complete and only records official release state. Create no commit for either checkpoint status.
