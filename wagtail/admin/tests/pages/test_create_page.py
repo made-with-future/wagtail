@@ -3600,6 +3600,105 @@ class TestCommenting(WagtailTestUtils, TestCase):
         self.assertEqual(callbacks, [])
         self.assertEqual(mail.outbox, [])
 
+    def test_permission_loss_json_serializes_rejected_comment_and_reply(self):
+        mentioned_user = self.add_page_editor(
+            "json-permission-loss", email="json-permission-loss@example.com"
+        )
+        comment_text, comment_occurrence = self.mention(
+            mentioned_user,
+            prefix="Rejected comment for ",
+            key="9ab135ec-9f21-4bd2-a871-f70fc313ca15",
+        )
+        reply_text, reply_occurrence = self.mention(
+            mentioned_user,
+            prefix="Rejected reply for ",
+            key="6e5c8ea6-9d78-410e-88e6-8c20df6d240a",
+        )
+
+        with mock.patch(
+            "wagtail.admin.forms.comments.page_mention_candidates",
+            return_value=type(mentioned_user).objects.none(),
+        ):
+            response = self.client.post(
+                self.add_url,
+                self.comment_post_data(
+                    slug="json-permission-loss-page",
+                    comment_text=comment_text,
+                    comment_mentions=[comment_occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                ),
+                headers={"Accept": "application/json"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        response_data = response.json()
+        self.assertEqual(response_data["success"], False)
+        self.assertEqual(response_data["error_code"], "validation_error")
+        self.assertEqual(
+            response_data["error_message"],
+            "There are validation errors, click save to highlight them.",
+        )
+        self.assertEqual(
+            set(response_data),
+            {"success", "error_code", "error_message", "comments"},
+        )
+        comment_data = response_data["comments"]["comments"][0]
+        reply_data = comment_data["replies"][0]
+        self.assertEqual(response_data["comments"]["mentioned_users"], {})
+        self.assertIsNone(comment_data["pk"])
+        self.assertEqual(comment_data["text"], comment_text)
+        self.assertEqual(comment_data["mentions"], [comment_occurrence])
+        self.assertEqual(comment_data["mention_error"], "Enter a valid mention list.")
+        self.assertIsNone(reply_data["pk"])
+        self.assertEqual(reply_data["text"], reply_text)
+        self.assertEqual(reply_data["mentions"], [reply_occurrence])
+        self.assertEqual(reply_data["mention_error"], "Enter a valid mention list.")
+        self.assertFalse(
+            SimplePage.objects.filter(slug="json-permission-loss-page").exists()
+        )
+
+    def test_structural_mention_errors_json_uses_sanitized_initial_values(self):
+        post_data = self.comment_post_data(
+            slug="json-structural-error-page",
+            comment_text="Rejected comment text",
+            comment_mentions=[],
+            reply_text="Rejected reply text",
+            reply_mentions=[],
+        )
+        post_data["comments-0-mentions"] = json.dumps(
+            [{"private-comment-payload": "do not return"}]
+        )
+        post_data["comments-0-replies-0-mentions"] = json.dumps(
+            [{"private-reply-payload": "do not return"}]
+        )
+
+        response = self.client.post(
+            self.add_url,
+            post_data,
+            headers={"Accept": "application/json"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        response_data = response.json()
+        self.assertEqual(response_data["success"], False)
+        self.assertEqual(response_data["error_code"], "validation_error")
+        self.assertEqual(
+            response_data["error_message"],
+            "There are validation errors, click save to highlight them.",
+        )
+        comment_data = response_data["comments"]["comments"][0]
+        reply_data = comment_data["replies"][0]
+        self.assertIsNone(comment_data["pk"])
+        self.assertEqual(comment_data["mentions"], [])
+        self.assertEqual(comment_data["mention_error"], "Enter a valid mention list.")
+        self.assertIsNone(reply_data["pk"])
+        self.assertEqual(reply_data["mentions"], [])
+        self.assertEqual(reply_data["mention_error"], "Enter a valid mention list.")
+        serialized_response = json.dumps(response_data)
+        self.assertNotIn("private-comment-payload", serialized_response)
+        self.assertNotIn("private-reply-payload", serialized_response)
+
     def test_save_rolls_back_provisional_page_when_scheduling_fails(self):
         mentioned_user = self.add_page_editor(
             "create-rollback", email="create-rollback@example.com"

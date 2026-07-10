@@ -5830,6 +5830,122 @@ class TestCommenting(WagtailTestUtils, TestCase):
         self.assertFalse(self.child_page.wagtail_admin_comments.exists())
         self.assertEqual(len(mail.outbox), 0)
 
+    def test_json_rejection_serializes_unsaved_comment_and_reply_state(self):
+        mentioned_user = self.add_page_editor(
+            "json-rejected-target", email="json-rejected-target@example.com"
+        )
+        comment_text, comment_occurrence = self.mention(
+            mentioned_user,
+            prefix="Rejected comment for ",
+            key="cf40a7ed-79f5-457a-8697-01fbb031223a",
+        )
+        reply_text, reply_occurrence = self.mention(
+            mentioned_user,
+            prefix="Rejected reply for ",
+            key="25b4709f-9220-4a5e-a8ac-af4c811efdd8",
+        )
+
+        with mock.patch(
+            "wagtail.admin.forms.comments.page_mention_candidates",
+            return_value=type(mentioned_user).objects.none(),
+        ):
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+                self.comment_post_data(
+                    comment_text=comment_text,
+                    comment_mentions=[comment_occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                ),
+                headers={"Accept": "application/json"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        response_data = response.json()
+        self.assertEqual(response_data["success"], False)
+        self.assertEqual(response_data["error_code"], "validation_error")
+        self.assertEqual(
+            response_data["error_message"],
+            "There are validation errors, click save to highlight them.",
+        )
+        self.assertEqual(
+            set(response_data),
+            {"success", "error_code", "error_message", "comments"},
+        )
+        comment_data = response_data["comments"]["comments"][0]
+        reply_data = comment_data["replies"][0]
+        self.assertEqual(response_data["comments"]["mentioned_users"], {})
+        self.assertIsNone(comment_data["pk"])
+        self.assertEqual(comment_data["text"], comment_text)
+        self.assertEqual(comment_data["mentions"], [comment_occurrence])
+        self.assertEqual(comment_data["mention_error"], "Enter a valid mention list.")
+        self.assertIsNone(reply_data["pk"])
+        self.assertEqual(reply_data["text"], reply_text)
+        self.assertEqual(reply_data["mentions"], [reply_occurrence])
+        self.assertEqual(reply_data["mention_error"], "Enter a valid mention list.")
+        self.assertFalse(self.child_page.wagtail_admin_comments.exists())
+
+    def test_json_structural_errors_serialize_existing_sanitized_mentions(self):
+        mentioned_user = self.add_page_editor(
+            "json-structural-target", email="json-structural-target@example.com"
+        )
+        comment_text, comment_occurrence = self.mention(
+            mentioned_user,
+            prefix="Stored comment for ",
+            key="777feade-1380-4699-a6e6-abca9bbd58aa",
+        )
+        reply_text, reply_occurrence = self.mention(
+            mentioned_user,
+            prefix="Stored reply for ",
+            key="9d9ed399-1952-4925-af9a-3ea0e4903f22",
+        )
+        comment = Comment.objects.create(
+            page=self.child_page,
+            user=self.user,
+            text=comment_text,
+            mentions=[comment_occurrence],
+            contentpath="title",
+        )
+        reply = CommentReply.objects.create(
+            comment=comment,
+            user=self.user,
+            text=reply_text,
+            mentions=[reply_occurrence],
+        )
+        post_data = self.existing_comment_post_data(comment=comment, reply=reply)
+        post_data["comments-0-mentions"] = json.dumps(
+            [{"private-comment-payload": "do not return"}]
+        )
+        post_data["comments-0-replies-0-mentions"] = json.dumps(
+            [{"private-reply-payload": "do not return"}]
+        )
+
+        response = self.client.post(
+            reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+            post_data,
+            headers={"Accept": "application/json"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        response_data = response.json()
+        self.assertEqual(response_data["success"], False)
+        self.assertEqual(response_data["error_code"], "validation_error")
+        self.assertEqual(
+            response_data["error_message"],
+            "There are validation errors, click save to highlight them.",
+        )
+        comment_data = response_data["comments"]["comments"][0]
+        reply_data = comment_data["replies"][0]
+        self.assertEqual(comment_data["pk"], comment.pk)
+        self.assertEqual(comment_data["mentions"], [comment_occurrence])
+        self.assertEqual(comment_data["mention_error"], "Enter a valid mention list.")
+        self.assertEqual(reply_data["pk"], reply.pk)
+        self.assertEqual(reply_data["mentions"], [reply_occurrence])
+        self.assertEqual(reply_data["mention_error"], "Enter a valid mention list.")
+        serialized_response = json.dumps(response_data)
+        self.assertNotIn("private-comment-payload", serialized_response)
+        self.assertNotIn("private-reply-payload", serialized_response)
+
     def test_edit_another_users_comment(self):
         comment = Comment.objects.create(
             page=self.child_page,

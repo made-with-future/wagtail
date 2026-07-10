@@ -353,7 +353,6 @@ class TestPageEditHandlers(TestCase):
         ValidatedPage.base_form_class, or provide a custom form class for the
         edit handler. Check the generated form class is of the correct type.
         """
-        ValidatedPage.edit_handler = TabbedInterface()
         with mock.patch.object(
             ValidatedPage, "edit_handler", new=TabbedInterface(), create=True
         ):
@@ -2145,15 +2144,53 @@ class TestCommentPanel(WagtailTestUtils, TestCase):
         self.make_messages_editable()
         self.store_mentions(self.comment, [self.valid_occurrence])
         self.store_mentions(self.reply_1, [self.valid_occurrence])
-        oversized = json.dumps(["é" * (16 * 1024)], ensure_ascii=False)
+        oversized = json.dumps(
+            ["private-oversized-" + "é" * (16 * 1024)], ensure_ascii=False
+        )
+        digit_limit = "[" + "1" * 5000 + "]"
+        invalid_shape = json.dumps([{"private-payload": "do not return"}])
 
-        for field, key, payload in (
-            ("comment-malformed", "comments-0-mentions", "{"),
-            ("comment-blank", "comments-0-mentions", ""),
-            ("comment-oversized", "comments-0-mentions", oversized),
-            ("reply-malformed", "comments-0-replies-0-mentions", "{"),
-            ("reply-blank", "comments-0-replies-0-mentions", ""),
-            ("reply-oversized", "comments-0-replies-0-mentions", oversized),
+        for field, key, payload, private_marker in (
+            ("comment-malformed", "comments-0-mentions", "{", None),
+            ("comment-blank", "comments-0-mentions", "", None),
+            (
+                "comment-oversized",
+                "comments-0-mentions",
+                oversized,
+                "private-oversized",
+            ),
+            (
+                "comment-digit-limit",
+                "comments-0-mentions",
+                digit_limit,
+                "1" * 5000,
+            ),
+            (
+                "comment-invalid-shape",
+                "comments-0-mentions",
+                invalid_shape,
+                "private-payload",
+            ),
+            ("reply-malformed", "comments-0-replies-0-mentions", "{", None),
+            ("reply-blank", "comments-0-replies-0-mentions", "", None),
+            (
+                "reply-oversized",
+                "comments-0-replies-0-mentions",
+                oversized,
+                "private-oversized",
+            ),
+            (
+                "reply-digit-limit",
+                "comments-0-replies-0-mentions",
+                digit_limit,
+                "1" * 5000,
+            ),
+            (
+                "reply-invalid-shape",
+                "comments-0-replies-0-mentions",
+                invalid_shape,
+                "private-payload",
+            ),
         ):
             with self.subTest(field=field):
                 form = self.make_page_form(data_overrides={key: payload})
@@ -2175,8 +2212,52 @@ class TestCommentPanel(WagtailTestUtils, TestCase):
                     data["comments"][0]["replies"][0]["mentions"],
                     [self.valid_occurrence],
                 )
+                target_data = (
+                    data["comments"][0]["replies"][0]
+                    if "replies" in key
+                    else data["comments"][0]
+                )
+                self.assertEqual(
+                    target_data["mention_error"], "Enter a valid mention list."
+                )
+                sibling_data = (
+                    data["comments"][0]
+                    if "replies" in key
+                    else data["comments"][0]["replies"][0]
+                )
+                self.assertNotIn("mention_error", sibling_data)
+                if private_marker:
+                    self.assertNotIn(private_marker, repr(data))
                 if payload == "{":
                     self.assertEqual(target_form["mentions"].value(), "{")
+
+    def test_recursion_failure_serializes_sanitized_initial_mentions(self):
+        self.make_messages_editable()
+        self.store_mentions(self.comment, [self.valid_occurrence])
+        self.store_mentions(self.reply_1, [self.valid_occurrence])
+        payload = json.dumps(["private-recursion-payload"])
+
+        for field, kwargs in (
+            ("comment", {"comment_mentions": payload}),
+            ("reply", {"reply_mentions": payload}),
+        ):
+            with self.subTest(field=field):
+                with mock.patch.object(
+                    forms.JSONField, "to_python", side_effect=RecursionError
+                ):
+                    form = self.make_page_form(**kwargs)
+                    self.assertFalse(form.is_valid())
+
+                data = form.serialize_comments(self.commenting_user)
+                comment_data = data["comments"][0]
+                target_data = (
+                    comment_data if field == "comment" else comment_data["replies"][0]
+                )
+                self.assertEqual(target_data["mentions"], [self.valid_occurrence])
+                self.assertEqual(
+                    target_data["mention_error"], "Enter a valid mention list."
+                )
+                self.assertNotIn("private-recursion-payload", repr(data))
 
     def test_serialization_separates_author_and_live_mention_metadata(self):
         self.store_mentions(self.comment, [self.valid_occurrence])
@@ -2486,10 +2567,215 @@ class TestCommentPanel(WagtailTestUtils, TestCase):
         )
         self.assertEqual(comments.non_form_errors(), [])
         self.assertEqual(comment_form["mentions"].value(), payload)
-        self.assertEqual(
-            form.serialize_comments(self.commenting_user)["comments"][0]["mentions"],
-            [occurrence],
+        comment_data = form.serialize_comments(self.commenting_user)["comments"][0]
+        self.assertEqual(comment_data["pk"], self.comment.pk)
+        self.assertEqual(comment_data["text"], forged_label)
+        self.assertEqual(comment_data["mentions"], [occurrence])
+        self.assertEqual(comment_data["mention_error"], "Enter a valid mention list.")
+
+    def test_rejected_unsaved_comment_and_reply_serialize_independent_bound_state(self):
+        self.make_messages_editable()
+        self.store_mentions(self.reply_2, [self.valid_occurrence])
+        ineligible = self.create_user(
+            "rejected-bound-target", email="rejected-bound@example.com"
         )
+        label = normalize_mention_label(ineligible)
+        comment_text = f"New comment for {label}"
+        reply_text = f"New reply for {label}"
+        comment_occurrence = {
+            "key": "d1f3d711-a452-4670-bd06-a365e2338004",
+            "user_id": str(ineligible.pk),
+            "start": len("New comment for "),
+            "end": len(comment_text),
+            "label": label,
+        }
+        reply_occurrence = {
+            "key": "48cc7d8e-e472-42d2-9d7a-9ea78bf36633",
+            "user_id": str(ineligible.pk),
+            "start": len("New reply for "),
+            "end": len(reply_text),
+            "label": label,
+        }
+        ineligible.delete()
+        form = self.make_page_form(
+            data_overrides={
+                "comments-TOTAL_FORMS": 2,
+                "comments-1-id": "",
+                "comments-1-text": comment_text,
+                "comments-1-contentpath": "location",
+                "comments-1-position": "",
+                "comments-1-resolved": "",
+                "comments-1-mentions": json.dumps([comment_occurrence]),
+                "comments-1-replies-TOTAL_FORMS": 1,
+                "comments-1-replies-INITIAL_FORMS": 0,
+                "comments-1-replies-MIN_NUM_FORMS": 0,
+                "comments-1-replies-MAX_NUM_FORMS": 1000,
+                "comments-1-replies-0-id": "",
+                "comments-1-replies-0-text": reply_text,
+                "comments-1-replies-0-mentions": json.dumps([reply_occurrence]),
+            }
+        )
+
+        self.assertFalse(form.is_valid())
+        data = form.serialize_comments(self.commenting_user)
+        existing_comment_data, rejected_comment_data = data["comments"]
+        rejected_reply_data = rejected_comment_data["replies"][0]
+
+        self.assertEqual(
+            data["mentioned_users"],
+            {str(self.mention_target.pk): {"email": "mention-target@example.com"}},
+        )
+        self.assertEqual(existing_comment_data["pk"], self.comment.pk)
+        self.assertNotIn("mention_error", existing_comment_data)
+        self.assertIsNone(rejected_comment_data["pk"])
+        self.assertEqual(rejected_comment_data["text"], comment_text)
+        self.assertEqual(rejected_comment_data["mentions"], [comment_occurrence])
+        self.assertEqual(
+            rejected_comment_data["mention_error"], "Enter a valid mention list."
+        )
+        self.assertIsNone(rejected_reply_data["pk"])
+        self.assertEqual(rejected_reply_data["text"], reply_text)
+        self.assertEqual(rejected_reply_data["mentions"], [reply_occurrence])
+        self.assertEqual(
+            rejected_reply_data["mention_error"], "Enter a valid mention list."
+        )
+
+    def test_target_rejection_keeps_retained_mention_metadata(self):
+        self.make_messages_editable()
+        self.store_mentions(self.comment, [self.valid_occurrence])
+        self.store_mentions(self.reply_1, [self.valid_occurrence])
+        ineligible = self.create_user(
+            "mixed-rejected-target", email="mixed-rejected-target@example.com"
+        )
+        label = normalize_mention_label(ineligible)
+        text = f"{self.mention_label} and {label}"
+        added_occurrence = {
+            "key": "7c9b3f31-00bb-42eb-b7aa-72d9731f8095",
+            "user_id": str(ineligible.pk),
+            "start": len(self.mention_label) + len(" and "),
+            "end": len(text),
+            "label": label,
+        }
+        occurrences = [self.valid_occurrence, added_occurrence]
+        payload = json.dumps(occurrences)
+
+        form = self.make_page_form(
+            comment_mentions=payload,
+            reply_mentions=payload,
+            data_overrides={
+                "comments-0-text": text,
+                "comments-0-replies-0-text": text,
+            },
+        )
+
+        self.assertFalse(form.is_valid())
+        data = form.serialize_comments(self.commenting_user)
+        comment_data = data["comments"][0]
+        reply_data = comment_data["replies"][0]
+        self.assertEqual(comment_data["mentions"], occurrences)
+        self.assertEqual(reply_data["mentions"], occurrences)
+        self.assertEqual(
+            data["mentioned_users"],
+            {str(self.mention_target.pk): {"email": "mention-target@example.com"}},
+        )
+
+    def test_unvalidated_additions_on_invalid_messages_use_sanitized_initials(self):
+        self.store_mentions(self.comment, [self.valid_occurrence])
+        self.store_mentions(self.reply_1, [self.valid_occurrence])
+        ineligible = self.create_user(
+            "invalid-message-target", email="invalid-message-target@example.com"
+        )
+        label = normalize_mention_label(ineligible)
+        text = f"{self.mention_label} and {label}"
+        added_occurrence = {
+            "key": "3ef6ef95-47ef-4462-9233-82ca3e5cc70f",
+            "user_id": str(ineligible.pk),
+            "start": len(self.mention_label) + len(" and "),
+            "end": len(text),
+            "label": label,
+        }
+        payload = json.dumps([self.valid_occurrence, added_occurrence])
+
+        form = self.make_page_form(
+            comment_mentions=payload,
+            reply_mentions=payload,
+            data_overrides={
+                "comments-0-text": text,
+                "comments-0-replies-0-text": text,
+            },
+        )
+
+        self.assertFalse(form.is_valid())
+        comment_form = form.formsets["comments"].forms[0]
+        reply_form = comment_form.formsets["replies"].forms[0]
+        self.assertIn("__all__", comment_form.errors)
+        self.assertIn("__all__", reply_form.errors)
+        data = form.serialize_comments(self.commenting_user)
+        comment_data = data["comments"][0]
+        reply_data = comment_data["replies"][0]
+        self.assertEqual(comment_data["mentions"], [self.valid_occurrence])
+        self.assertEqual(reply_data["mentions"], [self.valid_occurrence])
+        self.assertNotIn("mention_error", comment_data)
+        self.assertNotIn("mention_error", reply_data)
+        self.assertEqual(
+            data["mentioned_users"],
+            {str(self.mention_target.pk): {"email": "mention-target@example.com"}},
+        )
+
+    def test_unvalidated_additions_on_deleted_messages_use_sanitized_initials(self):
+        self.make_messages_editable()
+        self.store_mentions(self.comment, [self.valid_occurrence])
+        self.store_mentions(self.reply_1, [self.valid_occurrence])
+        ineligible = self.create_user(
+            "deleted-message-target", email="deleted-message-target@example.com"
+        )
+        label = normalize_mention_label(ineligible)
+        text = f"{self.mention_label} and {label}"
+        added_occurrence = {
+            "key": "a506a4ee-dabb-454b-8a01-d98a19184930",
+            "user_id": str(ineligible.pk),
+            "start": len(self.mention_label) + len(" and "),
+            "end": len(text),
+            "label": label,
+        }
+        payload = json.dumps([self.valid_occurrence, added_occurrence])
+
+        for field, kwargs, data_overrides in (
+            (
+                "comment",
+                {"comment_mentions": payload},
+                {"comments-0-text": text, "comments-0-DELETE": "1"},
+            ),
+            (
+                "reply",
+                {"reply_mentions": payload},
+                {
+                    "comments-0-replies-0-text": text,
+                    "comments-0-replies-0-DELETE": "1",
+                },
+            ),
+        ):
+            with self.subTest(field=field):
+                form = self.make_page_form(
+                    **kwargs,
+                    data_overrides=data_overrides,
+                )
+                self.assertTrue(form.is_valid(), form.errors)
+                data = form.serialize_comments(self.commenting_user)
+                comment_data = data["comments"][0]
+                target_data = (
+                    comment_data if field == "comment" else comment_data["replies"][0]
+                )
+                self.assertEqual(target_data["mentions"], [self.valid_occurrence])
+                self.assertEqual(target_data["deleted"], True)
+                self.assertEqual(
+                    data["mentioned_users"],
+                    {
+                        str(self.mention_target.pk): {
+                            "email": "mention-target@example.com"
+                        }
+                    },
+                )
 
     def test_duplicate_keys_across_messages_only_error_the_invalid_occurrence(self):
         self.make_messages_editable()

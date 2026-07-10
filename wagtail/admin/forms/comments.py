@@ -21,6 +21,29 @@ from .comment_mentions import CommentMentionsField, MentionedMessageFormMixin
 from .models import WagtailAdminModelForm
 
 
+def serialized_mentions(form, *, bound):
+    if (
+        bound
+        and form.mention_changes.added
+        and not getattr(form, "new_mentions_validated", False)
+    ):
+        return list(form.initial["mentions"])
+    return form.serialized_mentions(bound=bound)
+
+
+def serialized_mentioned_user_ids(form, mentions, *, bound):
+    rejected_keys = (
+        {occurrence["key"] for occurrence in form.mention_changes.added}
+        if bound and hasattr(form, "invalid_target_mentions")
+        else set()
+    )
+    return {
+        occurrence["user_id"]
+        for occurrence in mentions
+        if occurrence["key"] not in rejected_keys
+    }
+
+
 class CommentReplyForm(MentionedMessageFormMixin, WagtailAdminModelForm):
     mentions = CommentMentionsField(required=False)
 
@@ -48,13 +71,16 @@ class CommentReplyForm(MentionedMessageFormMixin, WagtailAdminModelForm):
         data["user"] = (
             str(self.instance.user_id) if self.instance.user_id is not None else None
         )
-        mentions = self.serialized_mentions(bound=bound)
+        mentions = serialized_mentions(self, bound=bound)
         data["mentions"] = mentions
+        if bound and "mentions" in self.errors:
+            data["mention_error"] = str(self.mention_validation_error)
         data["deleted"] = self.cleaned_data.get("DELETE", False) if bound else False
+        mentioned_user_ids = serialized_mentioned_user_ids(self, mentions, bound=bound)
         return (
             data,
             {self.instance.user_id},
-            {occurrence["user_id"] for occurrence in mentions},
+            mentioned_user_ids,
         )
 
 
@@ -130,9 +156,13 @@ class CommentForm(MentionedMessageFormMixin, WagtailAdminModelForm):
             if bound
             else self.instance.resolved_at is not None
         )
-        mentions = self.serialized_mentions(bound=bound)
+        mentions = serialized_mentions(self, bound=bound)
         data["mentions"] = mentions
-        mentioned_user_ids.update(occurrence["user_id"] for occurrence in mentions)
+        if bound and "mentions" in self.errors:
+            data["mention_error"] = str(self.mention_validation_error)
+        mentioned_user_ids.update(
+            serialized_mentioned_user_ids(self, mentions, bound=bound)
+        )
         data["replies"] = replies
         return data, user_pks, mentioned_user_ids
 
@@ -205,11 +235,13 @@ class CommentFormSet(BaseChildFormSet):
             return ()
 
         try:
-            return resolve_new_mention_users(
+            mentioned_users = resolve_new_mention_users(
                 [occurrence for form, occurrence in occurrence_forms],
                 candidates,
             )
         except InvalidMentionTargets as error:
+            for form, _ in occurrence_forms:
+                form.new_mentions_validated = True
             invalid_forms = []
             for index in error.invalid_indices:
                 form = occurrence_forms[index][0]
@@ -219,6 +251,9 @@ class CommentFormSet(BaseChildFormSet):
                 form.invalid_target_mentions = list(form.cleaned_data["mentions"])
                 form.add_error("mentions", form.mention_validation_error)
             raise
+        for form, _ in occurrence_forms:
+            form.new_mentions_validated = True
+        return mentioned_users
 
     def revalidate_new_mentions_for_page(self, page):
         self.validate_new_mentions(page_mention_candidates(page))

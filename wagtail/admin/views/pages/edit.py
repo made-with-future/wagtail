@@ -817,10 +817,16 @@ class EditView(
                 )
         else:
             if self.expects_json_response:
-                return self.json_error_response(
+                response = self.json_error_response(
                     "validation_error",
                     _("There are validation errors, click save to highlight them."),
                 )
+                comments_formset = form.formsets.get("comments")
+                if comments_formset is None:
+                    return response
+                response_data = json.loads(response.content)
+                response_data["comments"] = form.serialize_comments(self.request.user)
+                return JsonResponse(response_data, status=response.status_code)
             else:
                 messages.validation_error(
                     self.request,
