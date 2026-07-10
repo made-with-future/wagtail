@@ -628,7 +628,7 @@ git commit -m "Store and index structured comment mentions"
 
 **Interfaces:**
 - Consumes: Task 2 validators/current-email helper and Task 3 JSON fields/lookup models.
-- Produces: `CommentMentionsField`, `MentionedMessageFormMixin`, `CommentFormSet.sync_mention_lookups()`, form-level `mention_changes`, comment/reply wire serialization with `mentioned_users`, safe omission handling, and parent-page context for create forms.
+- Produces: `CanonicalCommentTextField`, `CommentMentionsField`, `MentionedMessageFormMixin`, `CommentFormSet.sync_mention_lookups()`, form-level `mention_changes`, comment/reply wire serialization with `mentioned_users`, safe omission handling, and parent-page context for create forms.
 
 - [ ] **Step 1: Write failing form and serialization tests**
 
@@ -654,7 +654,7 @@ def test_explicit_empty_list_removes_mentions(self):
     )
 ```
 
-Cover: unchanged browser payload for another author; resolve/reposition with omitted and hydrated fields; an omitted field redisplaying its canonical initial value when an unrelated page field fails; retained target rename/deactivation/deletion/permission loss; malformed/blank/oversize/digit-limit/recursive JSON and escaped-surrogate redisplay; comment/reply parity; repeated occurrences collapsing to one lookup row; prepared/display PK aliases resolving to one target while retaining both exact metadata keys; explicit clearing removing the exact message's lookup row; deleted targets not being recreated; a deleted parent skipping nested reply synchronization; invalid stored entries sanitized without dirtying another-author form; all user wire IDs remaining strings under the UUID user model; author JSON remaining exactly name/avatar with the current editor retained; mention-only targets excluded from authors; and current email appearing only under `mentioned_users`. Assert serialization performs one profile-aware author query and one mentioned-user query regardless of message count.
+Cover: browser-multipart CRLF canonicalizing to LF before occurrence validation and `changed_data` for both comments and replies; defensive field-level bare-CR canonicalization; unchanged multiline browser payload for another author; genuinely different comment and reply text remaining in `changed_data` and retaining the existing another-author non-field permission error; resolve/reposition with omitted and hydrated fields; an omitted field redisplaying its canonical initial value when an unrelated page field fails; retained target rename/deactivation/deletion/permission loss; malformed/blank/oversize/digit-limit/recursive JSON and escaped-surrogate redisplay; comment/reply parity; repeated occurrences collapsing to one lookup row; prepared/display PK aliases resolving to one target while retaining both exact metadata keys; explicit clearing removing the exact message's lookup row; deleted targets not being recreated; a deleted parent skipping nested reply synchronization; invalid stored entries sanitized without dirtying another-author form; all user wire IDs remaining strings under the UUID user model; author JSON remaining exactly name/avatar with the current editor retained; mention-only targets excluded from authors; and current email appearing only under `mentioned_users`. Assert serialization performs one profile-aware author query and one mentioned-user query regardless of message count.
 
 Add an exact live-metadata assertion:
 
@@ -680,7 +680,7 @@ python runtests.py -- \
   wagtail.admin.tests.test_edit_handlers.TestCommentPanel
 ```
 
-Expected: FAIL because the prototype field collapses omission to empty, replies lack mention forms, and serialization exposes email/edit URLs.
+Expected: FAIL because the prototype field collapses omission to empty, replies lack mention forms, serialization exposes email/edit URLs, and browser CRLF text does not validate against LF-authored mention offsets. The newline true-positive permission test already passes and must remain green.
 
 - [ ] **Step 3: Implement the omission-aware hidden JSON field**
 
@@ -704,6 +704,17 @@ from wagtail.admin.comment_mentions import (
 )
 
 MENTIONS_OMITTED = object()
+
+
+class CanonicalCommentTextField(forms.CharField):
+    def to_python(self, value):
+        value = super().to_python(value)
+        if value is None:
+            return value
+        return value.replace("\r\n", "\n").replace("\r", "\n")
+
+    def has_changed(self, initial, data):
+        return super().has_changed(self.to_python(initial), data)
 
 
 class CommentMentionsInput(forms.HiddenInput):
@@ -804,6 +815,7 @@ Make both forms consume the mixin:
 
 ```python
 class CommentReplyForm(MentionedMessageFormMixin, WagtailAdminModelForm):
+    text = CanonicalCommentTextField()
     mentions = CommentMentionsField(required=False)
 
     class Meta:
@@ -811,6 +823,7 @@ class CommentReplyForm(MentionedMessageFormMixin, WagtailAdminModelForm):
 
 
 class CommentForm(MentionedMessageFormMixin, WagtailAdminModelForm):
+    text = CanonicalCommentTextField()
     resolved = forms.BooleanField(required=False)
     mentions = CommentMentionsField(required=False)
 
@@ -823,7 +836,7 @@ class CommentForm(MentionedMessageFormMixin, WagtailAdminModelForm):
         }
 ```
 
-Declare the field on both concrete forms so Django's model-form metaclass collects it; keep parsing/cleaning behavior in the mixin. Its constructor canonicalizes stored JSON into `form.initial`, while `has_changed` treats only the explicit omission sentinel as unchanged, so malformed legacy entries and older clients cannot manufacture another-author edits. Set `self.parent_page = parent_page` before `WagtailAdminPageForm` calls `super().__init__`, add `parent_page` to the comment formset's `inherit_kwargs`, and add `page`/`parent_page` to the nested reply formset's inherited kwargs. Serialize each message's complete occurrence list directly, serialize only comment/reply authors, and restore author entries to:
+Declare both fields on both concrete forms so Django's model-form metaclass collects them; keep mention parsing/cleaning behavior in the mixin. `CanonicalCommentTextField.to_python()` canonicalizes submitted browser CRLF and bare CR to LF before permission checks and mention validation. Its `has_changed()` canonicalizes the initial value too, so a legacy CRLF message and its browser-normalized submission cannot manufacture an edit. Occurrence offsets are therefore validated against the same canonical LF text the model stores. The mixin constructor canonicalizes stored JSON into `form.initial`, while `CommentMentionsField.has_changed` treats only the explicit omission sentinel as unchanged, so malformed legacy entries and older clients cannot manufacture another-author edits. Set `self.parent_page = parent_page` before `WagtailAdminPageForm` calls `super().__init__`, add `parent_page` to the comment formset's `inherit_kwargs`, and add `page`/`parent_page` to the nested reply formset's inherited kwargs. Serialize each message's complete occurrence list directly, serialize only comment/reply authors, and restore author entries to:
 
 ```python
 {"name": user_display_name(user), "avatar_url": avatar_url(user)}
