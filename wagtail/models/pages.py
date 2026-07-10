@@ -34,7 +34,7 @@ from django.utils.text import capfirst, slugify
 from django.utils.translation import gettext
 from django.utils.translation import gettext_lazy as _
 from modelcluster.fields import ParentalKey
-from modelcluster.models import ClusterableModel, get_all_child_relations
+from modelcluster.models import ClusterableModel
 from treebeard.mp_tree import MP_Node, MP_NodeManager
 
 from wagtail.actions.copy_for_translation import CopyPageForTranslationAction
@@ -2687,6 +2687,7 @@ class Comment(ClusterableModel):
         related_name=COMMENTS_RELATION_NAME,
     )
     text = models.TextField()
+    mentions = models.JSONField(default=list)
 
     contentpath = models.TextField()
     # This stores the field or field within a streamfield block that the comment is applied on, in the form: 'field', or 'field.block_id.field'
@@ -2735,17 +2736,14 @@ class Comment(ClusterableModel):
                 update_fields = (
                     update_fields if update_fields else self._meta.get_fields()
                 )
-                child_relation_names = {
-                    rel.get_accessor_name() for rel in get_all_child_relations(self)
-                }
                 update_fields = [
-                    field.name
+                    field if isinstance(field, str) else field.name
                     for field in update_fields
-                    if field.name in child_relation_names
-                    or (
-                        getattr(field, "concrete", False)
-                        and field.name not in {"position", "id"}
-                    )
+                ]
+                update_fields = [
+                    field_name
+                    for field_name in update_fields
+                    if field_name not in {"position", "id"}
                 ]
             else:
                 # This is a new instance, we have to preserve and then restore the position via a variable
@@ -2809,22 +2807,25 @@ class Comment(ClusterableModel):
 
 class CommentMention(models.Model):
     comment = models.ForeignKey(
-        Comment, on_delete=models.CASCADE, related_name="mentions"
+        Comment,
+        on_delete=models.CASCADE,
+        related_name="+",
     )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name="comment_mentions",
+        related_name="+",
     )
-    notified_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        unique_together = [("comment", "user")]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["comment", "user"],
+                name="unique_comment_mention_user",
+            )
+        ]
         verbose_name = _("comment mention")
         verbose_name_plural = _("comment mentions")
-
-    def __str__(self):
-        return f"CommentMention for '{self.user}' on comment '{self.comment_id}'"
 
 
 class CommentReply(models.Model):
@@ -2835,6 +2836,7 @@ class CommentReply(models.Model):
         related_name="comment_replies",
     )
     text = models.TextField()
+    mentions = models.JSONField(default=list)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -2872,6 +2874,29 @@ class CommentReply(models.Model):
 
     def log_delete(self, **kwargs):
         self._log("wagtail.comments.delete_reply", **kwargs)
+
+
+class CommentReplyMention(models.Model):
+    reply = models.ForeignKey(
+        CommentReply,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["reply", "user"],
+                name="unique_comment_reply_mention_user",
+            )
+        ]
+        verbose_name = _("comment reply mention")
+        verbose_name_plural = _("comment reply mentions")
 
 
 class PageSubscription(models.Model):

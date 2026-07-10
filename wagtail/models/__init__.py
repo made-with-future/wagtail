@@ -59,6 +59,7 @@ from .pages import (  # noqa: F401
     Comment,
     CommentMention,
     CommentReply,
+    CommentReplyMention,
     GroupPagePermission,
     GroupPagePermissionManager,
     Page,
