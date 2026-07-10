@@ -2030,7 +2030,7 @@ Unit tests assert handler and `EditorState` behavior: ready Enter prevents defau
 
 Assert the actual contenteditable keeps Draftail's `role="textbox"` and `aria-multiline="true"` intact and receives the stable `id`, `data-focus-target`, `aria-autocomplete="list"`, and `aria-haspopup="listbox"`. Set `aria-controls` only while the real listbox exists and `aria-activedescendant` only while a valid option is active; remove popup ownership and active-option attributes when closed or stale. Do not set `aria-expanded` on the multiline textbox. Continue passing Draftail `ariaLabel` and merged/de-duplicated `ariaDescribedBy` through Draftail. Assert exact labels `Add a comment`, `Edit comment`, `Add a reply`, and `Edit reply`.
 
-Renderer/integration tests cover escaped plain text, repeated/multiple/malformed ranges, `.comment__mention`, saved visible label, `data-mention-user-id`, separately hydrated `data-mention-email`, no admin link, comment/reply add/edit/save/cancel, and error isolation.
+Renderer/integration tests cover escaped plain text, repeated/multiple/malformed ranges, `.comment__mention`, saved visible label, `data-mention-user-id`, immediate `data-mention-email` from a newly selected suggestion, authoritative separately hydrated `data-mention-email`, no admin link, comment/reply add/edit/save/cancel, and error isolation.
 
 - [ ] **Step 3: Run the combined RED suite**
 
@@ -2080,7 +2080,7 @@ On every Draft change, remove all associations for entities whose current text d
 
 Configure controlled Draftail with one `MENTION` entity type whose required `source` is an inert component returning `null` and whose `decorator` is the mention decorator. The source is unreachable because the decorator never calls `onEdit`. Pass `topToolbar={null}`, `bottomToolbar={null}`, `commandToolbar={null}`, `commands={false}`, empty block/inline/control arrays, and disabled undo/redo controls. Keep every `EditorState` change locally, notifying the parent only for a serialized value/occurrence change. Pass `ariaLabel={label}` and `ariaDescribedBy` directly to Draftail; bridge ID, focus target, popup state, ownership, and active option to the actual Draft.js contenteditable. Merge caller and error descriptions rather than overwriting either. Assert no `.Draftail-Toolbar`, inert source, textarea, or formatting control is rendered.
 
-Use the Task 11 hook, `onKeyDownCapture`, saved Draft selection for pointer insertion, and subsequent-`onChange` composition query recomputation. The decorator reads `mentionedUsers` from context, renders snapshot text plus separate metadata attributes, never calls Draftail `onEdit`, and never becomes a link.
+Use the Task 11 hook, `onKeyDownCapture`, saved Draft selection for pointer insertion, and subsequent-`onChange` composition query recomputation. Keep the selected suggestion's email in a component-local presentation map keyed by the exact string user ID so a newly inserted entity renders current email immediately and retains it through Draft undo/redo; do not add email to occurrence JSON or Draft entity data. When the server-provided `mentionedUsers` map changes, remove matching local entries so hydrated live metadata becomes authoritative without rehydrating the editor or dirtying the form. The decorator reads the merged metadata from context, renders snapshot text plus separate metadata attributes, never calls Draftail `onEdit`, and never becomes a link.
 
 - [ ] **Step 7: Migrate every comment and reply mode atomically**
 
