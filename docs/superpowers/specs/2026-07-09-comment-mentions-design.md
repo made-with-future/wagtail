@@ -185,7 +185,7 @@ The map contains only still-existing users referenced by a serialized occurrence
 
 Mention spans are presentation, not authorization, and are never linked to admin user records. Deleting a target user therefore changes neither the serialized occurrence nor its styling; it removes the inverse lookup row and live metadata entry. Renaming a user or changing their email updates only the separately hydrated metadata, not the snapshot label. Notification code resolves users from newly added occurrence targets rather than treating lookup-row creation as a notification event.
 
-Server-rendered email and HTML must not trust the JSON label as markup. All text is escaped, and range slicing uses the same UTF-16 helper used by validation.
+Server-rendered HTML must not trust message text or a JSON label as markup and uses normal Django autoescaping. The subject and text alternative are plain MIME text rather than markup, so they retain literal readable values instead of HTML-entity encoding ordinary punctuation. Range slicing uses the same UTF-16 helper used by validation.
 
 ## Notifications
 
@@ -195,9 +195,11 @@ Notification planning happens after validation and successful persistence and de
 - participants in affected comment threads under the existing rules, and
 - users newly mentioned in an affected comment or reply.
 
-"Newly mentioned" is the set of target users associated with new occurrence keys compared with the saved pre-edit list. Moving a retained occurrence does not notify again. Removing and later re-adding a user creates a new occurrence key and may notify again. Multiple new occurrences for the same user in one message produce one direct-mention reason.
+Global subscribers receive the existing new/resolved/deleted-comment and new-reply sections. Thread-only participants retain Wagtail's narrower existing scope: resolved comments and new replies only for threads where they authored the comment or an extant reply. A page subscription with comment notifications disabled removes only the subscription reason; it does not suppress an independent direct mention.
 
-Recipient deduplication occurs only after all reasons and affected messages have been merged. Consequently, a user who is both subscribed and directly mentioned receives one email containing the complete relevant set and explicit reason metadata; a notification for comment A cannot suppress their direct mention in comment B. The actor never receives mail for their own action.
+"Newly mentioned" is the set of target users associated with new occurrence keys compared with the saved pre-edit list. Targets are resolved from each added occurrence's `user_id` through the configured primary-key field, including prepared/display aliases and UUIDs; occurrence keys and inverse lookup-row creation are never used to resolve targets or infer novelty. Moving a retained occurrence does not notify again. Removing and later re-adding a user creates a new occurrence key and may notify again. Multiple new occurrences for the same user in one message produce one direct-mention reason.
+
+Recipient deduplication occurs only after all reasons and affected messages have been merged into independently owned per-recipient lists. Consequently, pruning a mentioned message for one recipient cannot alter another recipient's ordinary sections, and a user who is both subscribed and directly mentioned receives one email containing the complete relevant set and explicit reason metadata; a notification for comment A cannot suppress their direct mention in comment B. Exact message identity, including comment-versus-reply type and unsaved/deleted object identity, governs deduplication. The actor never receives mail for their own action.
 
 The existing updated-comments notification preference applies to mention mail. Inactive users, deleted users, users with no deliverable email address, and users who opted out remain visibly mentioned but receive no email.
 

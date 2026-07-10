@@ -1350,7 +1350,11 @@ self.assertEqual(payloads[self.mentioned_subscriber.pk].mentioned_comments, [com
 self.assertIn(comment_a, payloads[self.mentioned_subscriber.pk].new_comments)
 ```
 
-Cover actor exclusion, profile preference opt-out, inactive/deleted/no-email target, subscriber overlap, thread overlap, mention B plus subscription change A, repeated occurrences, multiple messages, comment/reply context, failed send, and no delivery before transaction commit.
+Cover actor exclusion by canonical PK; profile preference opt-out; inactive/deleted/no-email targets; a direct mention when the target's page subscription has `comment_notifications=False`; subscriber/thread/direct overlap; mention B plus subscription change A; repeated occurrences in one message; the same occurrence UUID reused by different messages; prepared/display and UUID user IDs; multiple messages; comment/reply context; exact-message pruning; independent per-recipient containers; failed send; empty-payload callback avoidance; and no delivery before transaction commit. Preserve the upstream thread scope exactly: thread-only participants receive only resolved comments and new replies for threads they participate in, never deleted comments or unrelated global changes. Global subscribers still receive all ordinary new/resolved/deleted-comment and new-reply sections. Prove lookup-state independence in both directions: an added occurrence notifies even when its exact message/user lookup row already exists, while a lookup row without an added occurrence creates no mention reason.
+
+Exercise grouping identity collisions explicitly: a `Comment` and `CommentReply` with the same numeric PK, same-text distinct saved messages, and distinct deleted/unsaved objects with `pk=None` must produce distinct signatures unless every ordered section identity actually matches.
+
+Use `captureOnCommitCallbacks(execute=True)` for `TestCase`: assert no mail inside the context and assert callbacks/mail only after context exit. Add an inner `transaction.atomic()` rollback case proving its callback and mail are discarded. Keep mail patches active through callback execution and patch `wagtail.admin.mail.send_mail` for failure behavior rather than making `send_notification` raise. A failed address must be logged, must not escape the callback, must not prevent attempts to later recipients in the group, and must create no retry or delivery state.
 
 Assert exact translated source output:
 
@@ -1369,7 +1373,7 @@ Run:
 python runtests.py -- wagtail.admin.tests.test_comment_notifications
 ```
 
-Expected: FAIL on cross-message overlap and exact mention copy; the prototype either omits comment B or labels it as a new comment.
+Expected: FAIL because the Task 7 planner does not exist and the current templates have no recipient-specific mention sections.
 
 - [ ] **Step 3: Implement the planner and on-commit delivery**
 
@@ -1393,27 +1397,45 @@ class RecipientPayload:
 
 def schedule_comment_notifications(*, page, editor, changes) -> None:
     payloads = build_recipient_payloads(page=page, editor=editor, changes=changes)
+    if not payloads:
+        return
+    groups = group_identical_payloads(payloads)
 
     def send():
-        for users, context in group_identical_payloads(payloads):
-            send_notification(users, "updated_comments", context)
+        for users, section_context in groups:
+            send_notification(
+                users,
+                "updated_comments",
+                {"page": page, "editor": editor, **section_context},
+            )
 
     transaction.on_commit(send)
 ```
 
-Implement `build_recipient_payloads(*, page, editor, changes) -> dict[object, RecipientPayload]` in four fixed passes: seed global subscribers only with the existing notification-worthy new/resolved/deleted-comment and new-reply sections; add those same sections for relevant thread participants without excluding users who already have another reason; resolve all users referenced by newly added occurrence keys in one active-user query and add the exact comment/reply reason; then remove messages from later sections when the same message is already in `Mentions`. Edited text or metadata alone never becomes a general subscriber/thread email. Every pass excludes only `editor.pk`, preserves formset order, drops empty payloads, and keys the map by canonical user PK. Implement `group_identical_payloads(payloads)` by a signature containing every ordered message identity and mention-reason flag, using `(model label, pk)` for saved objects and shared in-memory identity for deleted objects whose PK has been cleared, and return `(users, template_context)` groups. Let existing `send_notification` apply deliverable email/profile behavior. Do not create `notified_at` or retries, and never infer novelty from `CommentMention` / `CommentReplyMention` lookup-row creation.
+Implement `build_recipient_payloads(*, page, editor, changes) -> dict[object, RecipientPayload]` in four fixed passes:
+
+1. Seed global subscribers with independent copies of the existing notification-worthy new/resolved/deleted-comment and new-reply sections.
+2. Add only resolved comments and new replies for each thread participant's affected threads. Do not exclude global subscribers early; merge reasons and deduplicate exact message identities instead. Edits and deleted replies never create ordinary mail, and thread-only participants never receive deleted comments or unrelated changes.
+3. Read `user_id` from every `MentionedMessage.changes.added` occurrence, prepare it through the configured user primary-key field, resolve all direct targets in one active-user query, map prepared/display aliases to the same user, and add one exact comment/reply reason per target and message. Do not query occurrence keys or inverse lookup rows. Existing lookup rows do not suppress a new occurrence, and new lookup rows do not create notification novelty.
+4. For each recipient independently, remove an exactly mentioned comment only from comment sections and remove an exactly mentioned reply only from that thread's reply list, preserving other replies and dropping an empty thread entry.
+
+Every pass excludes `editor.pk`, preserves change order, drops empty payloads, and keys the map by canonical user PK. Each `RecipientPayload` must own its list objects and each `replied_comments` entry must own its nested reply list so pruning one recipient cannot mutate another. Define `mentioned_replies` entries exactly as `{"comment": parent_comment, "reply": reply}`; ordinary `replied_comments` remains `{"comment": parent_comment, "replies": [...]}`.
+
+Implement `group_identical_payloads(payloads)` with a signature containing every ordered section identity and reply nesting. Use `(model label, pk)` for saved objects and Python object identity for `pk=None`, so equal numeric comment/reply PKs, same-text messages, and distinct deleted objects never collide. It returns `(users, section_context)` without a shared `user`; `schedule_comment_notifications` adds `page` and `editor`, while existing `send_notification` supplies each recipient's `user`, language, active/email/profile filtering, and failure logging. A no-email or opted-out active target may exist in the planner payload but sends no mail; inactive/deleted direct targets are absent from the one active-user lookup. Ignore `send_notification`'s false return, create no delivery state/retry, and register no `on_commit` callback when payloads are empty.
 
 - [ ] **Step 4: Update all three templates and run exact-copy tests**
 
-Use `{% if mentioned_comments or mentioned_replies %}` in subject/body templates. Render escaped Django template variables without `safe` on comment/reply/label content. Preserve existing non-mention copy byte-for-byte when no mention reason exists.
+Use `{% if mentioned_comments or mentioned_replies %}` in subject/body templates. Subject and `.txt` are plain MIME text, not markup: retain literal readable page/editor/comment/reply values and the existing `safe` handling needed to prevent Django from converting ordinary apostrophes and ampersands into HTML entities. Preserve their non-mention wording, section order, whitespace, and page-edit link byte-for-byte, and render hostile-looking input literally as text. The `.html` alternative must use normal Django autoescaping with no `safe` on page/editor/comment/reply content. There is no separate mention-label interpolation; the saved label is already ordinary message text. Add exact plain-text and HTML golden tests, including literal hostile text in `.txt`, escaped hostile content in HTML, and the HTML alternate with `WAGTAILADMIN_NOTIFICATION_USE_HTML=True`.
 
 Run:
 
 ```bash
-python runtests.py -- wagtail.admin.tests.test_comment_notifications
+python runtests.py -- \
+  wagtail.admin.tests.test_comment_notifications \
+  wagtail.admin.tests.pages.test_edit_page.TestCommenting
 ```
 
-Expected: all notification, order, preference, failure, and on-commit tests PASS.
+Expected: all notification, order, preference, failure, escaping, upstream-copy, and on-commit tests PASS.
 
 - [ ] **Step 5: Commit notification planning**
 
