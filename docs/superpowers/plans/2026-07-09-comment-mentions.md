@@ -1921,7 +1921,27 @@ newMentions;
 mentionError?: string;
 ```
 
-`InitialComment.pk` and `InitialCommentReply.pk` are `number | null`. Global settings adds `mentionedUsers: Record<string, MentionedUser>` without adding email to authors or entity data.
+The server wire types are explicit and remain snake_case at the boundary:
+
+```typescript
+interface InitialComment {
+  pk: number | null;
+  mentions: SerializedMentionOccurrence[];
+  mention_error?: string;
+}
+
+interface InitialCommentReply {
+  pk: number | null;
+  mentions: SerializedMentionOccurrence[];
+  mention_error?: string;
+}
+
+interface CommentAppData {
+  mentioned_users: Record<string, MentionedUser>;
+}
+```
+
+Deserialize occurrences only through Task 9 and copy `mentioned_users` into global `settings.mentionedUsers` without adding email to authors or entity data. Rejected hydration binds numeric-PK messages by PK. Within each parent formset, it binds `pk: null` messages by canonical submitted formset position; it never matches by text, label, or user. Missing, locally deleted, or resolved entries are skipped and never recreated.
 
 Keep successful rebasing and rejected hydration separate:
 
@@ -1987,7 +2007,7 @@ export interface MentionEditorProps {
 
 Cover independently copied arrays **and occurrence objects** for comments, existing replies, and new replies; dirty comparison across key/user/range/label additions, removals, moves, and exact reverts; error-only state not dirty; equal reducer updates preserving `mentionError`; and only a semantically different local text/canonical-occurrence change clearing that message's error.
 
-Assert complete hidden five-field JSON for every participating comment/reply, including unchanged forms. Test `number | null` PKs, rejected unsaved messages remaining in hidden forms, cancel deleting a bound `pk: null` message, cancel restoring saved existing values, current-email metadata changes not dirtying content, deleted metadata omission, and sibling error isolation.
+Assert every participating comment and reply renders a hidden `mentions` input containing the canonical JSON array, where each occurrence has exactly `key`, `user_id`, `start`, `end`, and `label`, including unchanged forms. Test `number | null` PKs, two rejected null-PK comments and two null-PK replies to prove positional isolation, rejected unsaved messages remaining in hidden forms, cancel deleting a bound `pk: null` message, cancel restoring saved existing values, current-email metadata changes not dirtying content, deleted metadata omission, and sibling error isolation.
 
 Keep the public paths distinct:
 
@@ -2006,9 +2026,9 @@ Prove `MUTABLE` partial edits keep edited characters, then remove the complete m
 
 In `MentionEditor/index.test.tsx`, cover one Draftail contenteditable, no textarea/toolbars/format controls, local selection-only `EditorState` changes with no parent callback, parent callback only when serialized text/occurrences change, equal Redux echoes preserving selection/history, genuine external changes rehydrating, and metadata-only changes rerendering decoration without rehydration.
 
-Cover capture-phase keyboard behavior: ready Enter prevents default and stops propagation before Draft inserts a newline; ordinary Enter remains multiline; Tab closes without either; Ctrl/Cmd+B/I/U are prevented. Composition-end waits for the subsequent Draft `onChange` before querying. Cover Arrow wrap, Escape, pointer selection without blur, loading/ready/empty/error status, rich paste stripping, and one-step undo/redo.
+Unit tests assert handler and `EditorState` behavior: ready Enter prevents default and stops propagation before Draft inserts a newline; ordinary Enter is not intercepted and Draftail is configured multiline; Tab closes without interception; Ctrl/Cmd+B/I/U are prevented; pointer selection prevents blur and inserts at the saved Draft selection; and synthetic composition defers query recomputation until the next Draft `onChange`. Exercise cut/paste transformations through Draft handlers and editor state. Cover Arrow wrap, Escape, loading/ready/empty/error status, and one-step undo/redo. Task 13 owns native browser newline, paste, focus, and pointer behavior; Task 14 owns native IME/caret evidence.
 
-Assert the actual contenteditable receives the stable `id`, `data-focus-target`, Draftail `ariaLabel`, merged/de-duplicated `ariaDescribedBy`, combobox/listbox ownership/expanded/active-option state, and stale-attribute cleanup. Assert exact labels `Add a comment`, `Edit comment`, `Add a reply`, and `Edit reply`.
+Assert the actual contenteditable receives the stable `id`, `data-focus-target`, `role="combobox"`, `aria-autocomplete="list"`, and `aria-expanded` at all times (`false` when closed and `true` while the listbox is rendered). Set `aria-controls` only while that listbox exists and `aria-activedescendant` only while a valid option is active; remove those two attributes when closed or stale. Continue passing Draftail `ariaLabel` and merged/de-duplicated `ariaDescribedBy` through Draftail. Assert exact labels `Add a comment`, `Edit comment`, `Add a reply`, and `Edit reply`.
 
 Renderer/integration tests cover escaped plain text, repeated/multiple/malformed ranges, `.comment__mention`, saved visible label, `data-mention-user-id`, separately hydrated `data-mention-email`, no admin link, comment/reply add/edit/save/cancel, and error isolation.
 
@@ -2058,7 +2078,7 @@ On every Draft change, remove all associations for entities whose current text d
 
 - [ ] **Step 6: Implement the accessible toolbar-free editor**
 
-Render controlled Draftail with no block/inline/formatting controls and its only entity type `MENTION`. Keep every `EditorState` change locally, notifying the parent only for a serialized value/occurrence change. Pass `ariaLabel={label}` and `ariaDescribedBy` directly to Draftail; bridge ID, focus target, popup state, ownership, and active option to the actual Draft.js contenteditable. Merge caller and error descriptions rather than overwriting either.
+Configure controlled Draftail with one `MENTION` entity type whose required `source` is an inert component returning `null` and whose `decorator` is the mention decorator. The source is unreachable because the decorator never calls `onEdit`. Pass `topToolbar={null}`, `bottomToolbar={null}`, `commandToolbar={null}`, `commands={false}`, empty block/inline/control arrays, and disabled undo/redo controls. Keep every `EditorState` change locally, notifying the parent only for a serialized value/occurrence change. Pass `ariaLabel={label}` and `ariaDescribedBy` directly to Draftail; bridge ID, focus target, popup state, ownership, and active option to the actual Draft.js contenteditable. Merge caller and error descriptions rather than overwriting either. Assert no `.Draftail-Toolbar`, inert source, textarea, or formatting control is rendered.
 
 Use the Task 11 hook, `onKeyDownCapture`, saved Draft selection for pointer insertion, and subsequent-`onChange` composition query recomputation. The decorator reads `mentionedUsers` from context, renders snapshot text plus separate metadata attributes, never calls Draftail `onEdit`, and never becomes a link.
 
@@ -2076,7 +2096,7 @@ Save/cancel text and occurrences together. New-reply cancel clears both; existin
 
 - [ ] **Step 8: Add CSS once and finish visual/accessibility states**
 
-Import `draft-js/dist/Draft.css` exactly once from CommentApp `main.scss`. Style inline mentions, errors, selected options, popup scrolling, hidden Draftail toolbar containers, and forced-colors states in `Comment/style.scss`. Remove prototype contenteditable/caret-walker styling.
+Import `draft-js/dist/Draft.css` exactly once from CommentApp `main.scss`. Style inline mentions, errors, selected options, popup scrolling, and forced-colors states in `Comment/style.scss`. There must be no Draftail toolbar DOM to hide. Remove prototype contenteditable/caret-walker styling.
 
 - [ ] **Step 9: Run the complete frontend verification gate**
 
@@ -2120,6 +2140,7 @@ Freeze these exact scenario values:
 const baselinePrefix = 'Mention baseline 😀\nReview with ';
 const queryText = `${baselinePrefix}@adm`;
 const selectedText = `${baselinePrefix}@admin@example.com`;
+const insertedText = `${selectedText} `;
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -2149,23 +2170,23 @@ Keep the existing default for ordinary integration use; Task 13 always supplies 
 Use `/admin/pages/add/demosite/standardpage/2/` and a 120-second test timeout. The scenario must:
 
 1. Disable create autosave by setting `data-w-autosave-active-value="false"` before changing the title or comments.
-2. Fill a unique required title, await its slug, open the first comment editor, and type `queryText` into the stable create-comment Draftail contenteditable.
+2. Fill a unique required title, await its slug, open the first comment editor, type the first line, press Enter through `page.keyboard`, and type the second line up to but not including `@adm` through the browser.
 3. Assert there is one contenteditable and no textarea, Draftail toolbar, formatting control, or rich-text widget.
-4. Intercept the first real suggestion response with `route.fetch()`, hold fulfillment while loading is visible, run loading Axe, then fulfill the real response. Assert the create suggestion endpoint URL.
-5. Select `admin` by keyboard; assert `selectedText`, inline `.comment__mention`, `data-mention-user-id="1"`, `data-mention-email="admin@example.com"`, and the exact five-field hidden object above without numeric coercion.
-6. Run Axe with the popup closed and populated; later run empty-state Axe against a guaranteed no-match query.
-7. Re-enable autosave only after the exact hidden occurrence exists, then dispatch a bubbling `w-unsaved:add` event with `detail.type = 'edits'`.
-8. Await the create POST, hydrate event, autosave success, create-action replacement, and returned edit URL. Assert the create and post-hydration edit suggestion endpoint URLs.
+4. Before typing `@adm`, register a one-shot route whose handler captures the request, awaits `route.fetch()`, then waits on a resolver before calling `route.fulfill({ response })`. Type `@adm`, await the handler reaching that hold point, assert loading and run loading Axe, then release the resolver. Assert the create suggestion endpoint URL.
+5. Select `admin` by keyboard and assert `insertedText`, inline `.comment__mention`, `data-mention-user-id="1"`, `data-mention-email="admin@example.com"`, and the exact five-field hidden object above without numeric coercion. Capture its generated key. Prove one undo returns `queryText` with `[]` and one redo restores `insertedText` with the same key. Press Backspace once to remove only the unlinked trailing space, then use `selectedText` as the persisted baseline.
+6. Run Axe in four distinct states: loading, ready/open with options, empty/open against a guaranteed no-match query, and closed.
+7. Install the create-response, `w-autosave:hydrate`, and `w-autosave:success` waiters first. On `#page-edit-form`, set `data-w-autosave-active-value="true"` and dispatch `new CustomEvent('w-unsaved:add', { bubbles: true, detail: { type: 'edits' } })` only after the exact hidden occurrence exists.
+8. Capture the create POST JSON, await hydration and success, resolve `response.url` against `TEST_ORIGIN`, then assert `form.action` and `page.url()` equal that absolute edit URL and that the resolved `hydrate_url` was requested. Assert the create and post-hydration edit suggestion endpoint URLs.
 9. Reload/follow the edit URL and assert exact text, entity attributes, key, opaque ID, offsets, label, and complete hidden JSON survive.
-10. Assert hidden occurrences after every edit. Prove edits before/after retain key and shift/preserve offsets, partial/whole mention replacement removes the occurrence while retaining resulting plain text, and text/entity undo/redo is exactly one step.
-11. Prove rich HTML paste becomes plain text and Ctrl/Cmd+B/I/U do not introduce formatting.
-12. Restore `selectedText` and its exact occurrence between destructive cases.
-13. Add/edit/cancel/save/reload a reply mention; finally remove the reply occurrence while retaining its reply text.
+10. Restore `selectedText` and the captured occurrence before each destructive case. Inserting one ASCII character before the mention retains the key and changes offsets to 33/51; inserting after it retains the key and offsets 32/50. Partial replacement leaves the exact resulting plain text with `[]`; one undo restores the original text/entity/key and one redo removes it again. Whole replacement leaves its exact replacement text with `[]`. Assert complete hidden JSON after every operation.
+11. Perform rich paste through a granted browser clipboard and `ControlOrMeta+V`, not a synthetic `ClipboardEvent`; assert exact plain text, no formatting DOM, and complete hidden JSON. Prove Ctrl/Cmd+B/I/U do not introduce formatting.
+12. Restore `selectedText` and its captured exact occurrence between every destructive case.
+13. Add/edit/cancel/save/reload a reply mention, selecting one reply suggestion by pointer; finally remove the reply occurrence while retaining its reply text.
 14. Open results, press Tab, and prove focus moves normally while listbox/expanded/active-option attributes close and stale attributes disappear.
 15. Assert actual contenteditable accessible name/descriptions/focus/listbox relationships, not wrapper-only attributes.
-16. Restore the exact baseline before the final 1024x768 image, await fonts/layout, and write `autocomplete-open.png` and `after-redesign.png` only when `COMMENT_MENTIONS_EVIDENCE_DIR` is set.
+16. When evidence output is enabled, create its directory, restore `queryText`, open the ready popup, and capture `autocomplete-open.png`; then select the suggestion, remove its unlinked trailing space, reassert `selectedText` and the exact occurrence, and capture `after-redesign.png`. Await `document.fonts.ready` and stable animation frames and assert a 1024x768 viewport. Task 14 records HEAD/OID, Wagtail and Chromium versions, OS, URLs/states, dimensions, and checksums; Task 13 screenshots alone are not final metadata.
 
-Do not claim that the browser mutates live email, uses a UUID user model, or performs native IME input. Attribute those to lower tests or Task 14's recorded manual native-IME pass.
+Task 13 does not exercise native IME or composition-caret behavior. Attribute those claims only to a separately recorded Task 14 run using a real installed IME; otherwise state that IME is untested. Do not claim that this browser scenario mutates live email or uses a UUID user model.
 
 - [ ] **Step 3: Install/build and prepare one fresh server environment**
 
@@ -2199,6 +2220,16 @@ TEST_ORIGIN="$TEST_ORIGIN" PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" 
 ```
 
 Expected: PASS is valid on the first run because Tasks 8-12 are prerequisites. Do not manufacture a RED failure. Stop the server after the run and remove the temporary database when evidence collection is complete.
+
+In the foreground server terminal, press Ctrl-C, then clean up exactly:
+
+```bash
+rm -f "$WAGTAIL_UI_TEST_DB" \
+  "${WAGTAIL_UI_TEST_DB}-journal" \
+  "${WAGTAIL_UI_TEST_DB}-wal" \
+  "${WAGTAIL_UI_TEST_DB}-shm" \
+  /tmp/comment-mentions-task13.env
+```
 
 - [ ] **Step 5: Fix only genuine browser discrepancies and rerun all affected gates**
 
