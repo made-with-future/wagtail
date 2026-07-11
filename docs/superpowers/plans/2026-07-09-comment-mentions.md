@@ -2031,7 +2031,7 @@ Keep the public paths distinct:
 
 - [ ] **Step 2: Write failing Draft conversion, editor, renderer, and integration tests**
 
-In `draftail.test.ts`, cover plain/multiline hydration, emoji offsets, multiple blocks, repeated users, duplicate labels, deterministic extraction, edits before/after/through entities, cut, selected replacement, plain-text paste, query extraction, suggestion insertion with injected UUID, and text/entity undo/redo.
+In `draftail.test.ts`, cover plain/multiline hydration, emoji offsets, multiple blocks, repeated users, duplicate labels, deterministic extraction, edits before/after/through entities, cut, selected replacement, plain-text paste, query extraction, suggestion insertion with injected UUID, and text/entity undo/redo. Query extraction must reject any candidate range containing a character associated with a live `MENTION` entity, including a caret inside the entity, at its half-open end after deleting the unlinked trailing space, or after adjacent token characters extend the candidate. It must continue recognizing an ordinary unassociated `@query` and text whose invalidated mention association has been removed by normalization.
 
 Hydration is all-or-nothing: validate canonical order, unique keys, non-overlap, bounds and UTF-16 boundaries, one-block containment, and exact label slices **before applying any entity**. One invalid/cross-block/mismatched occurrence produces plain text with no entities.
 
@@ -2085,7 +2085,7 @@ document.addEventListener('w-autosave:error', ({ detail }) => {
 
 - [ ] **Step 5: Implement deterministic Draft hydration, extraction, and insertion**
 
-Use `ContentState.createFromText(value)` and map absolute UTF-16 offsets into ordinary Draft blocks. Validate the full list first. Create `MUTABLE` entities containing only `{ key, userId, label }`. Extraction joins blocks with `\n`, walks contiguous `MENTION` ranges, verifies entity text equals the snapshot label, converts to absolute offsets, and returns canonical occurrences.
+Use `ContentState.createFromText(value)` and map absolute UTF-16 offsets into ordinary Draft blocks. Validate the full list first. Create `MUTABLE` entities containing only `{ key, userId, label }`. Extraction joins blocks with `\n`, walks contiguous `MENTION` ranges, verifies entity text equals the snapshot label, converts to absolute offsets, and returns canonical occurrences. Query recognition first finds the ordinary block-local candidate, then returns `null` before the suggestion hook can run if any character in that candidate range is associated with a `MENTION` entity. Inspect the entire half-open candidate range rather than only the caret character so a caret at an entity's end cannot reinterpret the saved label as a new query.
 
 On every Draft change, remove all associations for entities whose current text differs from their stored label by replacing current content with `EditorState.set`, then serialize. Insertion uses one final content state and one `apply-entity` push, followed by forced selection after the trailing space.
 
@@ -2197,7 +2197,7 @@ Use `/admin/pages/add/demosite/standardpage/2/` and a 120-second test timeout. T
 13. Add/edit/cancel/save/reload a reply mention, selecting one reply suggestion by pointer; finally remove the reply occurrence while retaining its reply text.
 14. Open results, press Tab, and prove focus moves normally while the listbox closes, popup-ownership and active-option attributes disappear, and no `aria-expanded` is set on the multiline textbox.
 15. Assert the actual contenteditable keeps Draftail's `role="textbox"` and `aria-multiline="true"`, carries `aria-autocomplete="list"` and `aria-haspopup="listbox"`, and receives the accessible name, descriptions, focus target, and only live listbox relationships rather than wrapper-only attributes.
-16. When evidence output is enabled, create its directory, restore `queryText`, open the ready popup, and capture `autocomplete-open.png`; then select the suggestion, remove its unlinked trailing space, reassert `selectedText` and the exact occurrence, and capture `after-redesign.png`. Await `document.fonts.ready` and stable animation frames and assert a 1024x768 viewport. Task 14 records HEAD/OID, Wagtail and Chromium versions, OS, URLs/states, dimensions, and checksums; Task 13 screenshots alone are not final metadata.
+16. When evidence output is enabled, create its directory, restore `queryText`, open the ready popup, and capture `autocomplete-open.png`; then select the suggestion, remove its unlinked trailing space, and reassert `selectedText`, the exact occurrence, and that no suggestion list or loading, empty, or error status is present before capturing `after-redesign.png`. Await `document.fonts.ready` and stable animation frames and assert a 1024x768 viewport. Task 14 records HEAD/OID, Wagtail and Chromium versions, OS, URLs/states, dimensions, and checksums; Task 13 screenshots alone are not final metadata.
 
 Task 13 does not exercise native IME or composition-caret behavior. Attribute those claims only to a separately recorded Task 14 run using a real installed IME; otherwise state that IME is untested. Do not claim that this browser scenario mutates live email or uses a UUID user model.
 
