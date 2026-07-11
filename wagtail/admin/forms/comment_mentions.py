@@ -17,6 +17,17 @@ from wagtail.admin.comment_mentions import (
 MENTIONS_OMITTED = object()
 
 
+class CanonicalCommentTextField(forms.CharField):
+    def to_python(self, value):
+        value = super().to_python(value)
+        if value is None:
+            return value
+        return value.replace("\r\n", "\n").replace("\r", "\n")
+
+    def has_changed(self, initial, data):
+        return super().has_changed(self.to_python(initial), data)
+
+
 class CommentMentionsInput(forms.HiddenInput):
     def value_from_datadict(self, data, files, name):
         if name not in data:

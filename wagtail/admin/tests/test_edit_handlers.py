@@ -19,6 +19,7 @@ from freezegun import freeze_time
 from wagtail.admin.comment_mentions import (
     normalize_mention_label,
     resolve_new_mention_users,
+    utf16_length,
 )
 from wagtail.admin.forms import WagtailAdminModelForm, WagtailAdminPageForm
 from wagtail.admin.panels import (
@@ -2034,6 +2035,92 @@ class TestCommentPanel(WagtailTestUtils, TestCase):
         self.assertEqual(comment_form.mention_changes.removed, ())
         self.assertEqual(reply_form.mention_changes.added, ())
         self.assertEqual(reply_form.mention_changes.removed, ())
+
+    def test_browser_newlines_are_canonicalized_for_comments_and_replies(self):
+        self.make_messages_editable()
+        prefix = "Mention baseline 😀\nReview with "
+        text = f"{prefix}{self.mention_label}"
+        browser_text = text.replace("\n", "\r\n")
+        occurrence = self.valid_occurrence | {
+            "start": utf16_length(prefix),
+            "end": utf16_length(text),
+        }
+        payload = json.dumps([occurrence])
+
+        form = self.make_page_form(
+            comment_mentions=payload,
+            reply_mentions=payload,
+            data_overrides={
+                "comments-0-text": browser_text,
+                "comments-0-replies-0-text": browser_text,
+            },
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        comment_form = form.formsets["comments"].forms[0]
+        reply_form = comment_form.formsets["replies"].forms[0]
+        self.assertEqual(comment_form.cleaned_data["text"], text)
+        self.assertEqual(reply_form.cleaned_data["text"], text)
+        self.assertEqual(comment_form.cleaned_data["mentions"], [occurrence])
+        self.assertEqual(reply_form.cleaned_data["mentions"], [occurrence])
+        data = form.serialize_comments(self.commenting_user)
+        self.assertEqual(data["comments"][0]["text"], text)
+        self.assertEqual(data["comments"][0]["mentions"], [occurrence])
+        self.assertEqual(data["comments"][0]["replies"][0]["text"], text)
+        self.assertEqual(data["comments"][0]["replies"][0]["mentions"], [occurrence])
+
+        form.save()
+        self.comment.refresh_from_db()
+        self.reply_1.refresh_from_db()
+        self.assertEqual(self.comment.text, text)
+        self.assertEqual(self.reply_1.text, text)
+        self.assertEqual(self.comment.mentions, [occurrence])
+        self.assertEqual(self.reply_1.mentions, [occurrence])
+
+    def test_browser_newlines_do_not_dirty_another_authors_messages(self):
+        text = "First line\nSecond line"
+        self.comment.text = text
+        self.comment.save(update_fields=["text"])
+        self.reply_1.text = text
+        self.reply_1.save(update_fields=["text"])
+        browser_text = text.replace("\n", "\r\n")
+
+        form = self.make_page_form(
+            data_overrides={
+                "comments-0-text": browser_text,
+                "comments-0-replies-0-text": browser_text,
+            }
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        comment_form = form.formsets["comments"].forms[0]
+        reply_form = comment_form.formsets["replies"].forms[0]
+        self.assertFalse(comment_form.has_changed())
+        self.assertFalse(reply_form.has_changed())
+        self.assertNotIn("__all__", comment_form.errors)
+        self.assertNotIn("__all__", reply_form.errors)
+
+    def test_genuine_text_changes_remain_unauthorized_for_other_authors(self):
+        form = self.make_page_form(
+            data_overrides={
+                "comments-0-text": "Genuinely changed comment",
+                "comments-0-replies-0-text": "Genuinely changed reply",
+            }
+        )
+
+        self.assertFalse(form.is_valid())
+        comment_form = form.formsets["comments"].forms[0]
+        reply_form = comment_form.formsets["replies"].forms[0]
+        self.assertIn("text", comment_form.changed_data)
+        self.assertIn("text", reply_form.changed_data)
+        self.assertEqual(
+            comment_form.errors["__all__"],
+            ["You cannot edit another user's comment."],
+        )
+        self.assertEqual(
+            reply_form.errors["__all__"],
+            ["You cannot edit another user's comment."],
+        )
 
     def test_explicit_empty_lists_record_comment_and_reply_removals(self):
         self.make_messages_editable()

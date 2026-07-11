@@ -336,6 +336,40 @@ class TestStoredMentionHandling(SimpleTestCase):
         )
 
 
+class TestCanonicalCommentTextField(SimpleTestCase):
+    def test_to_python_canonicalizes_newlines(self):
+        from wagtail.admin.forms.comment_mentions import CanonicalCommentTextField
+
+        field = CanonicalCommentTextField()
+        cases = (
+            ("lf", "First line\nSecond line", "First line\nSecond line"),
+            ("crlf", "First line\r\nSecond line", "First line\nSecond line"),
+            ("cr", "First line\rSecond line", "First line\nSecond line"),
+            ("empty", "", ""),
+            ("none", None, ""),
+            ("unicode", "Review 😀 café", "Review 😀 café"),
+        )
+
+        for name, value, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(field.to_python(value), expected)
+
+    def test_equivalent_newlines_are_unchanged(self):
+        from wagtail.admin.forms.comment_mentions import CanonicalCommentTextField
+
+        field = CanonicalCommentTextField()
+        values = (
+            "First line\nSecond line",
+            "First line\r\nSecond line",
+            "First line\rSecond line",
+        )
+
+        for initial in values:
+            for submitted in values:
+                with self.subTest(initial=repr(initial), submitted=repr(submitted)):
+                    self.assertFalse(field.has_changed(initial, submitted))
+
+
 class TestCommentMentionsField(SimpleTestCase):
     def test_omission_is_distinct_from_an_explicit_empty_list(self):
         from wagtail.admin.forms.comment_mentions import (

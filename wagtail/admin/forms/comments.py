@@ -17,7 +17,11 @@ from wagtail.admin.comment_mentions import (
 )
 from wagtail.admin.templatetags.wagtailadmin_tags import avatar_url, user_display_name
 
-from .comment_mentions import CommentMentionsField, MentionedMessageFormMixin
+from .comment_mentions import (
+    CanonicalCommentTextField,
+    CommentMentionsField,
+    MentionedMessageFormMixin,
+)
 from .models import WagtailAdminModelForm
 
 
@@ -45,6 +49,7 @@ def serialized_mentioned_user_ids(form, mentions, *, bound):
 
 
 class CommentReplyForm(MentionedMessageFormMixin, WagtailAdminModelForm):
+    text = CanonicalCommentTextField()
     mentions = CommentMentionsField(required=False)
 
     class Meta:
@@ -89,6 +94,7 @@ class CommentForm(MentionedMessageFormMixin, WagtailAdminModelForm):
     This is designed to be subclassed and have the user overridden to enable user-based validation within the edit handler system
     """
 
+    text = CanonicalCommentTextField()
     resolved = forms.BooleanField(required=False)
     mentions = CommentMentionsField(required=False)
 
