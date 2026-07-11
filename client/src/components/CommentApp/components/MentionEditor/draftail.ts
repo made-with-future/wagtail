@@ -278,7 +278,19 @@ export function getMentionQueryFromEditorState(
   if (range === undefined) return null;
 
   const offset = range.start + selection.getAnchorOffset();
-  return findMentionQuery(content.getPlainText('\n'), offset, offset);
+  const query = findMentionQuery(content.getPlainText('\n'), offset, offset);
+  if (query === null) return null;
+
+  const containsMentionEntity = range.block
+    .getCharacterList()
+    .slice(query.start - range.start, query.end - range.start)
+    .some(
+      (character) =>
+        character !== undefined &&
+        isMentionEntity(content, character.getEntity()),
+    );
+
+  return containsMentionEntity ? null : query;
 }
 
 export function insertMentionSuggestion(

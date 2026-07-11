@@ -154,6 +154,98 @@ test('extracts mention queries only from a collapsed Draft selection', () => {
   expect(getMentionQueryFromEditorState(selected)).toBeNull();
 });
 
+test('ignores a mention query when the caret is inside its live entity', () => {
+  const value = 'Hello @Ada';
+  const state = createMentionEditorState(value, [
+    occurrence(value, 'ada', '7', '@Ada'),
+  ]);
+  const block = firstBlock(state);
+  const selected = EditorState.forceSelection(state, selection(block, 8));
+
+  expect(getMentionQueryFromEditorState(selected)).toBeNull();
+});
+
+test('ignores a mention query at its half-open end after deleting its trailing space', () => {
+  const state = createMentionEditorState('@ad', []);
+  const block = firstBlock(state);
+  const selected = EditorState.forceSelection(state, selection(block, 3));
+  const inserted = insertMentionSuggestion(
+    selected,
+    { start: 0, end: 3, query: 'ad' },
+    { id: '7', label: '@Ada', email: 'ada@example.com' },
+    () => 'mention-ada',
+  );
+  const insertedBlock = firstBlock(inserted);
+  const withoutSpaceContent = Modifier.removeRange(
+    inserted.getCurrentContent(),
+    selection(insertedBlock, 4, 5),
+    'backward',
+  );
+  const withoutSpace = normalizeMentionEditorState(
+    pushContent(inserted, withoutSpaceContent, 'backspace-character'),
+  );
+  const withoutSpaceBlock = firstBlock(withoutSpace);
+  const atEntityEnd = EditorState.forceSelection(
+    withoutSpace,
+    selection(withoutSpaceBlock, 4),
+  );
+
+  expect(serializeMentionEditorState(atEntityEnd)).toEqual({
+    value: '@Ada',
+    mentions: [
+      {
+        key: 'mention-ada',
+        userId: '7',
+        start: 0,
+        end: 4,
+        label: '@Ada',
+      },
+    ],
+  });
+  expect(getMentionQueryFromEditorState(atEntityEnd)).toBeNull();
+});
+
+test('ignores a query extended past a live mention by adjacent token characters', () => {
+  const value = '@Adaextra';
+  const state = createMentionEditorState(value, [
+    occurrence(value, 'ada', '7', '@Ada'),
+  ]);
+  const block = firstBlock(state);
+  const selected = EditorState.forceSelection(
+    state,
+    selection(block, value.length),
+  );
+
+  expect(getMentionQueryFromEditorState(selected)).toBeNull();
+});
+
+test('recognizes query-shaped text after normalization removes its mismatched entity', () => {
+  const value = 'Hello @Ada';
+  const state = createMentionEditorState(value, [
+    occurrence(value, 'ada', '7', '@Ada'),
+  ]);
+  const block = firstBlock(state);
+  const changedContent = Modifier.replaceText(
+    state.getCurrentContent(),
+    selection(block, 8, 9),
+    'x',
+  );
+  const normalized = normalizeMentionEditorState(
+    pushContent(state, changedContent, 'insert-characters'),
+  );
+  const normalizedBlock = firstBlock(normalized);
+  const selected = EditorState.forceSelection(
+    normalized,
+    selection(normalizedBlock, normalizedBlock.getLength()),
+  );
+
+  expect(getMentionQueryFromEditorState(selected)).toEqual({
+    start: 6,
+    end: 10,
+    query: 'Axa',
+  });
+});
+
 test('inserts one mutable entity and an unlinked trailing space in one undo step', () => {
   const state = createMentionEditorState('Hello @ad world', []);
   const block = firstBlock(state);
