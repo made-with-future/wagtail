@@ -1,8 +1,12 @@
+import os
+
 from .settings import *  # noqa: F403
 
 # Settings meant to run the test suite with Django’s development server, for integration tests.
 
-DATABASES["default"]["NAME"] = "ui_tests.db"  # noqa: F405
+DATABASES["default"]["NAME"] = os.environ.get(  # noqa: F405
+    "WAGTAIL_UI_TEST_DB", "ui_tests.db"
+)
 
 INSTALLED_APPS += [  # noqa: F405
     "pattern_library",

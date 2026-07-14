@@ -33,19 +33,43 @@ $box-padding: 20px;
     box-shadow: 3px 2px 3px -1px theme('colors.black-10');
   }
 
-  textarea {
+  textarea,
+  .Draftail-Editor {
     margin: 0;
-    padding: 12px;
     width: 100%;
     background-color: theme('colors.surface-field');
     border: 1px solid theme('colors.border-field-default');
     border-radius: 5px;
     color: $color-box-text;
 
-    &::placeholder {
+    &::placeholder,
+    .public-DraftEditorPlaceholder-root {
       color: theme('colors.text-placeholder');
       opacity: 1;
     }
+  }
+
+  textarea {
+    padding: 12px;
+  }
+
+  .Draftail-Editor {
+    min-height: 44px;
+
+    &--focus {
+      border-color: theme('colors.border-field-hover');
+    }
+  }
+
+  .public-DraftEditor-content,
+  .public-DraftEditorPlaceholder-root {
+    padding: 12px;
+  }
+
+  .public-DraftEditor-content {
+    min-height: 44px;
+    line-height: 150%;
+    word-break: break-word;
   }
 
   &__text {
@@ -58,6 +82,64 @@ $box-padding: 20px;
     padding-bottom: 10px;
     word-break: break-all;
     white-space: pre-wrap;
+  }
+
+  &__mention {
+    color: theme('colors.text-link-default');
+    font-weight: 700;
+  }
+
+  &__mention-error,
+  &__mention-status {
+    margin: 6px 0 0;
+    font-size: 13px;
+    line-height: 150%;
+  }
+
+  &__mention-error,
+  &__mention-status--error {
+    color: theme('colors.text-error');
+  }
+
+  &__editor {
+    position: relative;
+  }
+
+  &__mention-suggestions {
+    position: absolute;
+    z-index: 1;
+    list-style: none;
+    margin: 2px 0 0;
+    padding: 0;
+    width: 100%;
+    background-color: theme('colors.surface-page');
+    border: 1px solid theme('colors.border-field-default');
+    border-radius: 3px;
+    box-shadow: 0 2px 4px theme('colors.black-10');
+    max-height: 180px;
+    overflow-y: auto;
+  }
+
+  &__mention-suggestion {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: 100%;
+    padding: 8px 10px;
+    color: $color-box-text;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+
+    &--highlighted,
+    &:hover {
+      background-color: theme('colors.surface-field');
+    }
+
+    span:first-child {
+      font-weight: 700;
+    }
   }
 
   form {
@@ -179,6 +261,22 @@ $box-padding: 20px;
   &__reply-input {
     /* stylelint-disable-next-line declaration-no-important */
     margin-top: 20px !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .comment__mention {
+    color: LinkText;
+    outline: 1px solid currentColor;
+  }
+
+  .comment__mention-suggestion--highlighted {
+    color: HighlightText;
+    background-color: Highlight;
+  }
+
+  .comment__mention-error {
+    color: Mark;
   }
 }
 

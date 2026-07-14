@@ -15,6 +15,15 @@ urlpatterns = [
         name="add",
     ),
     path(
+        "add/<slug:content_type_app_name>/<slug:content_type_model_name>/<int:parent_page_id>/comment-mention-suggestions/",
+        page_viewset_registry.as_view(
+            "create_comment_mention_suggestions",
+            app_label_kwarg="content_type_app_name",
+            model_name_kwarg="content_type_model_name",
+        ),
+        name="create_comment_mention_suggestions",
+    ),
+    path(
         "add/<slug:content_type_app_name>/<slug:content_type_model_name>/<int:parent_page_id>/preview/",
         page_viewset_registry.as_view(
             "preview_on_add",
@@ -65,6 +74,14 @@ urlpatterns = [
             page_id_kwarg="page_id",
         ),
         name="edit",
+    ),
+    path(
+        "<int:page_id>/edit/comment-mention-suggestions/",
+        page_viewset_registry.as_view(
+            "comment_mention_suggestions",
+            page_id_kwarg="page_id",
+        ),
+        name="comment_mention_suggestions",
     ),
     path(
         "<int:page_id>/edit/preview/",

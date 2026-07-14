@@ -11,6 +11,7 @@ import {
   reset,
   setFocusedComment,
   updateComment,
+  updateReply,
 } from './actions/comments';
 import { updateGlobalSettings } from './actions/settings';
 import CommentComponent from './components/Comment';
@@ -27,6 +28,7 @@ import { Store, reducer } from './state';
 import {
   Author,
   Comment,
+  CommentReply,
   INITIAL_STATE as INITIAL_COMMENTS_STATE,
   newComment,
   newCommentReply,
@@ -34,22 +36,32 @@ import {
 import { INITIAL_STATE as INITIAL_SETTINGS_STATE } from './state/settings';
 import { LayoutController } from './utils/layout';
 import { getOrDefault } from './utils/maps';
+import {
+  MentionedUser,
+  SerializedMentionOccurrence,
+  deserializeMentionOccurrences,
+  serializeMentionOccurrences,
+} from './utils/mentions';
 import { getNextCommentId, getNextReplyId } from './utils/sequences';
 
 // This is done as this is serialized pretty directly from the Django model
 export interface InitialCommentReply {
-  pk: number;
+  pk: number | null;
   user: any;
   text: string;
+  mentions: SerializedMentionOccurrence[];
+  mention_error?: string;
   created_at: string;
   updated_at: string;
   deleted: boolean;
 }
 
 export interface InitialComment {
-  pk: number;
+  pk: number | null;
   user: any;
   text: string;
+  mentions: SerializedMentionOccurrence[];
+  mention_error?: string;
   created_at: string;
   updated_at: string;
   replies: InitialCommentReply[];
@@ -87,7 +99,13 @@ function CommentListing({
   comments,
 }: CommentListingProps): React.ReactElement {
   const state = store.getState();
-  const { user, currentTab, isReloading } = state.settings;
+  const {
+    user,
+    currentTab,
+    isReloading,
+    mentionedUsers,
+    mentionSuggestionsUrl,
+  } = state.settings;
   const { focusedComment, forceFocus } = state.comments;
   const commentsListRef = React.useRef<HTMLOListElement | null>(null);
   // Update the position of the comments listing as the window scrolls to keep the comments in line with the content
@@ -144,6 +162,8 @@ function CommentListing({
       isFocused={comment.localId === focusedComment}
       forceFocus={forceFocus}
       isVisible={layout.getCommentVisible(currentTab, comment.localId)}
+      mentionedUsers={mentionedUsers}
+      mentionSuggestionsUrl={mentionSuggestionsUrl}
     />
   ));
 
@@ -158,7 +178,12 @@ function CommentListing({
 export interface CommentAppData {
   comments: InitialComment[];
   user: number | string;
-  authors: Record<string, { name: string; avatar_url: string }>;
+  authors: Record<
+    string,
+    { name: string; avatar_url: string; email?: string; url?: string }
+  >;
+  mentioned_users: Record<string, MentionedUser>;
+  mention_suggestions_url?: string;
 }
 
 export interface LoadDataOptions {
@@ -176,6 +201,32 @@ export interface LoadDataOptions {
   /** The remote ID of the comment to focus initially (if any). */
   focusedCommentId?: number;
 }
+
+const isParticipatingComment = (comment: Comment) =>
+  comment.mode !== 'creating' || comment.text.length > 0;
+
+interface SubmittedContent {
+  text: string;
+  mentions: SerializedMentionOccurrence[];
+}
+
+interface SubmittedReplyPosition extends SubmittedContent {
+  replyLocalId: number;
+}
+
+interface SubmittedCommentPosition extends SubmittedContent {
+  commentLocalId: number;
+  replies: SubmittedReplyPosition[];
+}
+
+const hasChangedSinceSubmission = (
+  message: Pick<Comment | CommentReply, 'text' | 'mentions'>,
+  submitted: SubmittedContent | undefined,
+) =>
+  submitted !== undefined &&
+  (message.text !== submitted.text ||
+    JSON.stringify(serializeMentionOccurrences(message.mentions)) !==
+      JSON.stringify(submitted.mentions));
 
 export class CommentApp {
   store: Store;
@@ -196,6 +247,7 @@ export class CommentApp {
 
   actions = commentActionFunctions;
   activationHandlers: Array<() => void> = [];
+  private submittedPositions: SubmittedCommentPosition[] | null = null;
 
   constructor() {
     this.store = createStore(reducer, {
@@ -230,6 +282,23 @@ export class CommentApp {
 
   setCurrentTab(tab: string | null) {
     this.store.dispatch(updateGlobalSettings({ currentTab: tab }));
+  }
+
+  captureSubmittedPositions() {
+    this.submittedPositions = Array.from(
+      this.store.getState().comments.comments.values(),
+    )
+      .filter(isParticipatingComment)
+      .map((comment) => ({
+        commentLocalId: comment.localId,
+        text: comment.text,
+        mentions: serializeMentionOccurrences(comment.mentions),
+        replies: Array.from(comment.replies.values()).map((reply) => ({
+          replyLocalId: reply.localId,
+          text: reply.text,
+          mentions: serializeMentionOccurrences(reply.mentions),
+        })),
+      }));
   }
 
   makeComment(annotation: Annotation, contentpath: string, position = '') {
@@ -288,11 +357,25 @@ export class CommentApp {
       comments: initialComments,
       user: userId,
       authors: authorsData,
+      mentioned_users: mentionedUsersData,
+      mention_suggestions_url: mentionSuggestionsUrl,
     }: CommentAppData,
     { skipRemoved = false, focusedCommentId }: LoadDataOptions = {},
   ) {
+    this.submittedPositions = null;
     const authors = new Map(Object.entries(authorsData));
     this.setUser(userId, authors);
+    this.store.dispatch(
+      updateGlobalSettings({
+        mentionSuggestionsUrl,
+        mentionedUsers: Object.fromEntries(
+          Object.entries(mentionedUsersData).map(([id, user]) => [
+            id,
+            { ...user },
+          ]),
+        ),
+      }),
+    );
 
     // Check if there is "comment" query parameter.
     // If this is set, the user has clicked on a "View on frontend" link of an
@@ -315,6 +398,12 @@ export class CommentApp {
     // Fetch existing comments
     for (const comment of comments) {
       const commentId = getNextCommentId();
+      const mentions = deserializeMentionOccurrences(comment.mentions || []);
+      const hasMentionError = comment.mention_error !== undefined;
+      let mode: Comment['mode'] = 'default';
+      if (hasMentionError) {
+        mode = comment.pk === null ? 'creating' : 'editing';
+      }
 
       // Create comment
       this.store.dispatch(
@@ -328,13 +417,24 @@ export class CommentApp {
             Date.parse(comment.created_at),
             {
               remoteId: comment.pk,
+              mode,
               text: comment.text,
               deleted: comment.deleted,
               resolved: comment.resolved,
+              mentions,
             },
           ),
         ),
       );
+      if (hasMentionError) {
+        this.store.dispatch(
+          updateComment(commentId, {
+            newText: comment.text,
+            newMentions: mentions,
+            mentionError: comment.mention_error,
+          }),
+        );
+      }
 
       const replies = skipRemoved
         ? comment.replies.filter((reply) => !reply.deleted)
@@ -342,21 +442,37 @@ export class CommentApp {
 
       // Create replies
       for (const reply of replies) {
+        const replyId = getNextReplyId();
+        const replyMentions = deserializeMentionOccurrences(
+          reply.mentions || [],
+        );
+        const replyHasMentionError = reply.mention_error !== undefined;
         this.store.dispatch(
           addReply(
             commentId,
             newCommentReply(
-              getNextReplyId(),
+              replyId,
               getAuthor(authors, reply.user),
               Date.parse(reply.created_at),
               {
                 remoteId: reply.pk,
+                mode: replyHasMentionError ? 'editing' : 'default',
                 text: reply.text,
                 deleted: reply.deleted,
+                mentions: replyMentions,
               },
             ),
           ),
         );
+        if (replyHasMentionError) {
+          this.store.dispatch(
+            updateReply(commentId, replyId, {
+              newText: reply.text,
+              newMentions: replyMentions,
+              mentionError: reply.mention_error,
+            }),
+          );
+        }
       }
 
       // If this is the initial focused comment. Focus and pin it
@@ -402,6 +518,134 @@ export class CommentApp {
     this.store.dispatch(updateGlobalSettings({ isReloading: false }));
   }
 
+  hydrateRejectedData(data: CommentAppData) {
+    const localComments = this.store.getState().comments.comments;
+    const submittedPositions = this.submittedPositions;
+    this.submittedPositions = null;
+
+    this.store.dispatch(
+      updateGlobalSettings({
+        mentionSuggestionsUrl: data.mention_suggestions_url,
+        mentionedUsers: Object.fromEntries(
+          Object.entries(data.mentioned_users).map(([id, user]) => [
+            id,
+            { ...user },
+          ]),
+        ),
+      }),
+    );
+
+    data.comments.forEach((initialComment, commentIndex) => {
+      const submittedComment = submittedPositions?.[commentIndex];
+      let localComment: Comment | undefined;
+      if (initialComment.pk === null) {
+        localComment =
+          submittedComment === undefined
+            ? undefined
+            : localComments.get(submittedComment.commentLocalId);
+      } else {
+        localComment = Array.from(localComments.values()).find(
+          (comment) => comment.remoteId === initialComment.pk,
+        );
+      }
+
+      if (
+        !localComment ||
+        localComment.deleted ||
+        localComment.resolved ||
+        (initialComment.pk === null && localComment.remoteId !== null)
+      ) {
+        return;
+      }
+
+      const submittedCommentLineage =
+        submittedComment?.commentLocalId === localComment.localId
+          ? submittedComment
+          : submittedPositions?.find(
+              (position) => position.commentLocalId === localComment.localId,
+            );
+      const isCommentEditing = ['creating', 'editing'].includes(
+        localComment.mode,
+      );
+      const mentions = deserializeMentionOccurrences(
+        initialComment.mentions || [],
+      );
+      if (!hasChangedSinceSubmission(localComment, submittedCommentLineage)) {
+        this.store.dispatch(
+          updateComment(localComment.localId, {
+            text: initialComment.text,
+            mentions,
+            ...(isCommentEditing
+              ? {}
+              : {
+                  newText: initialComment.text,
+                  newMentions: mentions,
+                }),
+            mentionError: initialComment.mention_error,
+            ...(initialComment.mention_error === undefined || isCommentEditing
+              ? {}
+              : {
+                  mode: localComment.remoteId === null ? 'creating' : 'editing',
+                }),
+          }),
+        );
+      }
+
+      const localReplies = localComment.replies;
+      initialComment.replies.forEach((initialReply, replyIndex) => {
+        const submittedReply = submittedCommentLineage?.replies[replyIndex];
+        let localReply: CommentReply | undefined;
+        if (initialReply.pk === null) {
+          localReply =
+            submittedReply === undefined
+              ? undefined
+              : localReplies.get(submittedReply.replyLocalId);
+        } else {
+          localReply = Array.from(localReplies.values()).find(
+            (reply) => reply.remoteId === initialReply.pk,
+          );
+        }
+
+        if (
+          !localReply ||
+          localReply.deleted ||
+          (initialReply.pk === null && localReply.remoteId !== null)
+        ) {
+          return;
+        }
+
+        const submittedReplyLineage =
+          submittedReply?.replyLocalId === localReply.localId
+            ? submittedReply
+            : submittedCommentLineage?.replies.find(
+                (position) => position.replyLocalId === localReply.localId,
+              );
+        const isReplyEditing = localReply.mode === 'editing';
+        const replyMentions = deserializeMentionOccurrences(
+          initialReply.mentions || [],
+        );
+        if (!hasChangedSinceSubmission(localReply, submittedReplyLineage)) {
+          this.store.dispatch(
+            updateReply(localComment.localId, localReply.localId, {
+              text: initialReply.text,
+              mentions: replyMentions,
+              ...(isReplyEditing
+                ? {}
+                : {
+                    newText: initialReply.text,
+                    newMentions: replyMentions,
+                  }),
+              mentionError: initialReply.mention_error,
+              ...(initialReply.mention_error === undefined || isReplyEditing
+                ? {}
+                : { mode: 'editing' }),
+            }),
+          );
+        }
+      });
+    });
+  }
+
   renderApp(
     element: HTMLElement,
     outputElement: HTMLElement,
@@ -417,9 +661,7 @@ export class CommentApp {
 
       ReactDOM.render(
         <CommentFormSetComponent
-          comments={commentList.filter(
-            (comment) => comment.mode !== 'creating',
-          )}
+          comments={commentList.filter(isParticipatingComment)}
           remoteCommentCount={state.comments.remoteCommentCount}
         />,
         outputElement,

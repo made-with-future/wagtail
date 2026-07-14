@@ -9,12 +9,16 @@ from django.contrib.auth.models import Group, Permission
 from django.contrib.contenttypes.models import ContentType
 from django.core import mail
 from django.core.mail import EmailMultiAlternatives
+from django.db import connection
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from freezegun import freeze_time
 from openpyxl import load_workbook
 
 from wagtail.admin.admin_url_finder import AdminURLFinder
+from wagtail.admin.comment_notifications import (
+    schedule_comment_notifications as real_schedule_comment_notifications,
+)
 from wagtail.admin.mail import (
     BaseWorkflowStateEmailNotifier,
     WorkflowStateApprovalEmailNotifier,
@@ -28,9 +32,15 @@ from wagtail.admin.utils import (
 )
 from wagtail.locks import BasicLock
 from wagtail.models import (
+    Comment,
+    CommentMention,
+    CommentReply,
+    CommentReplyMention,
     GroupApprovalTask,
     GroupPagePermission,
     Page,
+    PageLogEntry,
+    PageSubscription,
     PageViewRestriction,
     Task,
     TaskState,
@@ -1714,6 +1724,731 @@ class BasePageWorkflowTests(AdminTemplateTestUtils, WagtailTestUtils, TestCase):
 
     def reject(self, data=None, **kwargs):
         return self.workflow_action("reject", data, **kwargs)
+
+
+class TestCommentMentionWorkflows(BasePageWorkflowTests):
+    def setUp(self):
+        super().setUp()
+        self.object.save_revision()
+        PageSubscription.objects.create(
+            page=self.object,
+            user=self.submitter,
+            comment_notifications=True,
+        )
+        PageSubscription.objects.create(
+            page=self.object,
+            user=self.moderator,
+            comment_notifications=False,
+        )
+
+    def mention(self, user, *, prefix, key):
+        label = f"@{user.email}"
+        text = f"{prefix}{label}"
+        return text, {
+            "key": key,
+            "user_id": str(user.pk),
+            "start": len(prefix),
+            "end": len(text),
+            "label": label,
+        }
+
+    def scheduler_then_raise(self, registrations):
+        def schedule(*, page, editor, changes):
+            before = len(connection.run_on_commit)
+            real_schedule_comment_notifications(
+                page=page,
+                editor=editor,
+                changes=changes,
+            )
+            registered = connection.run_on_commit[before:]
+            self.assertEqual(len(registered), 1)
+            registrations.extend(item[1] for item in registered)
+            raise RuntimeError("scheduler failed")
+
+        return schedule
+
+    def comment_data(self, *, text, mentions, reply_text=None, reply_mentions=()):
+        data = {
+            "comments-TOTAL_FORMS": "1",
+            "comments-INITIAL_FORMS": "0",
+            "comments-MIN_NUM_FORMS": "0",
+            "comments-MAX_NUM_FORMS": "",
+            "comments-0-DELETE": "",
+            "comments-0-resolved": "",
+            "comments-0-id": "",
+            "comments-0-contentpath": "title",
+            "comments-0-text": text,
+            "comments-0-mentions": json.dumps(mentions),
+            "comments-0-position": "",
+            "comments-0-replies-TOTAL_FORMS": "1" if reply_text else "0",
+            "comments-0-replies-INITIAL_FORMS": "0",
+            "comments-0-replies-MIN_NUM_FORMS": "0",
+            "comments-0-replies-MAX_NUM_FORMS": "0",
+        }
+        if reply_text:
+            data.update(
+                {
+                    "comments-0-replies-0-id": "",
+                    "comments-0-replies-0-DELETE": "",
+                    "comments-0-replies-0-text": reply_text,
+                    "comments-0-replies-0-mentions": json.dumps(reply_mentions),
+                }
+            )
+        return data
+
+    def rollback_comment_data(self, *, actor, name, keys):
+        old_target = self.add_mention_target(f"{name}-old")
+        new_target = self.add_mention_target(f"{name}-new")
+        old_text, old_occurrence = self.mention(
+            old_target,
+            prefix="Original comment for ",
+            key=keys[0],
+        )
+        old_reply_text, old_reply_occurrence = self.mention(
+            old_target,
+            prefix="Original reply for ",
+            key=keys[1],
+        )
+        comment = Comment.objects.create(
+            page=self.object,
+            user=actor,
+            text=old_text,
+            mentions=[old_occurrence],
+            contentpath="title",
+        )
+        reply = CommentReply.objects.create(
+            comment=comment,
+            user=actor,
+            text=old_reply_text,
+            mentions=[old_reply_occurrence],
+        )
+        CommentMention.objects.create(comment=comment, user=old_target)
+        CommentReplyMention.objects.create(reply=reply, user=old_target)
+
+        new_text, new_occurrence = self.mention(
+            new_target,
+            prefix="Changed comment for ",
+            key=keys[2],
+        )
+        new_reply_text, new_reply_occurrence = self.mention(
+            new_target,
+            prefix="Changed reply for ",
+            key=keys[3],
+        )
+        data = {
+            "title": f"{name} changed title",
+            "content": f"{name} changed content",
+            "comments-TOTAL_FORMS": "1",
+            "comments-INITIAL_FORMS": "1",
+            "comments-MIN_NUM_FORMS": "0",
+            "comments-MAX_NUM_FORMS": "",
+            "comments-0-DELETE": "",
+            "comments-0-resolved": "",
+            "comments-0-id": str(comment.pk),
+            "comments-0-contentpath": comment.contentpath,
+            "comments-0-text": new_text,
+            "comments-0-mentions": json.dumps([new_occurrence]),
+            "comments-0-position": "",
+            "comments-0-replies-TOTAL_FORMS": "1",
+            "comments-0-replies-INITIAL_FORMS": "1",
+            "comments-0-replies-MIN_NUM_FORMS": "0",
+            "comments-0-replies-MAX_NUM_FORMS": "0",
+            "comments-0-replies-0-id": str(reply.pk),
+            "comments-0-replies-0-DELETE": "",
+            "comments-0-replies-0-text": new_reply_text,
+            "comments-0-replies-0-mentions": json.dumps([new_reply_occurrence]),
+        }
+        subscription = PageSubscription.objects.get(page=self.object, user=actor)
+        if not subscription.comment_notifications:
+            data["comment_notifications"] = "on"
+        return data
+
+    def start_workflow(self):
+        self.post("submit")
+        self.object.refresh_from_db()
+        state = self.object.current_workflow_state
+        self.assertEqual(state.status, WorkflowState.STATUS_IN_PROGRESS)
+        mail.outbox = []
+        return state
+
+    def add_mention_target(self, username):
+        user = self.create_user(username, email=f"{username}@example.com")
+        Group.objects.get(name="Editors").user_set.add(user)
+        return user
+
+    def add_ordinary_subscriber(self, username):
+        user = self.create_user(username, email=f"{username}@example.com")
+        PageSubscription.objects.create(
+            page=self.object,
+            user=user,
+            comment_notifications=True,
+        )
+        return user
+
+    def assert_saved_comment_pair(
+        self,
+        *,
+        actor,
+        target,
+        ordinary_subscriber,
+        comment_occurrence,
+        reply_occurrence,
+        after_log_pk,
+    ):
+        comment = self.object.wagtail_admin_comments.get()
+        reply = comment.replies.get()
+        self.assertEqual(comment.mentions, [comment_occurrence])
+        self.assertEqual(reply.mentions, [reply_occurrence])
+        self.assertEqual(
+            set(
+                CommentMention.objects.filter(comment=comment).values_list(
+                    "user_id", flat=True
+                )
+            ),
+            {target.pk},
+        )
+        self.assertEqual(
+            set(
+                CommentReplyMention.objects.filter(reply=reply).values_list(
+                    "user_id", flat=True
+                )
+            ),
+            {target.pk},
+        )
+        self.object.refresh_from_db()
+        revision = self.object.get_latest_revision()
+        self.assertCountEqual(
+            PageLogEntry.objects.filter(
+                page=self.object,
+                pk__gt=after_log_pk,
+                action__in=[
+                    "wagtail.comments.create",
+                    "wagtail.comments.create_reply",
+                ],
+            ).values_list("action", "revision_id"),
+            [
+                ("wagtail.comments.create", revision.pk),
+                ("wagtail.comments.create_reply", revision.pk),
+            ],
+        )
+        recipients = {recipient for message in mail.outbox for recipient in message.to}
+        self.assertEqual(recipients, {target.email, ordinary_subscriber.email})
+        self.assertNotIn(actor.email, recipients)
+        return revision
+
+    def lifecycle_snapshot(self):
+        self.object.refresh_from_db()
+        workflow_values = []
+        for state in self.object.workflow_states.order_by("pk"):
+            task_state = state.current_task_state
+            workflow_values.append(
+                (
+                    state.pk,
+                    state.status,
+                    task_state.pk if task_state else None,
+                    list(
+                        state.task_states.order_by("pk").values(
+                            "pk", "task_id", "status", "revision_id"
+                        )
+                    ),
+                )
+            )
+        return {
+            "title": self.object.title,
+            "content": self.object.content,
+            "live": self.object.live,
+            "latest_revision_id": self.object.latest_revision_id,
+            "revision_count": self.object.revisions.count(),
+            "comments": list(
+                Comment.objects.filter(page=self.object)
+                .order_by("pk")
+                .values("pk", "text", "mentions")
+            ),
+            "replies": list(
+                CommentReply.objects.filter(comment__page=self.object)
+                .order_by("pk")
+                .values("pk", "text", "mentions")
+            ),
+            "comment_mentions": list(
+                CommentMention.objects.filter(comment__page=self.object)
+                .order_by("pk")
+                .values_list("comment_id", "user_id")
+            ),
+            "reply_mentions": list(
+                CommentReplyMention.objects.filter(reply__comment__page=self.object)
+                .order_by("pk")
+                .values_list("reply_id", "user_id")
+            ),
+            "subscriptions": list(
+                PageSubscription.objects.filter(page=self.object)
+                .order_by("user_id")
+                .values_list("user_id", "comment_notifications")
+            ),
+            "logs": list(
+                PageLogEntry.objects.filter(page=self.object)
+                .order_by("pk")
+                .values("pk", "action", "revision_id", "data")
+            ),
+            "workflows": workflow_values,
+        }
+
+    def assert_lifecycle_snapshot(self, snapshot):
+        self.assertEqual(self.lifecycle_snapshot(), snapshot)
+        self.assertEqual(mail.outbox, [])
+
+    def test_cancel_with_invalid_top_level_mention_leaves_workflow_active(self):
+        workflow_state = self.start_workflow()
+        ineligible_user = self.create_user(
+            "ineligible-comment", email="ineligible-comment@example.com"
+        )
+        text, occurrence = self.mention(
+            ineligible_user,
+            prefix="Invalid for ",
+            key="5e4c6b14-ac72-4b7a-976b-d13b858e9707",
+        )
+
+        response = self.post(
+            "cancel-workflow",
+            self.comment_data(text=text, mentions=[occurrence]),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        workflow_state.refresh_from_db()
+        self.assertEqual(workflow_state.status, WorkflowState.STATUS_IN_PROGRESS)
+        comment_form = response.context["form"].formsets["comments"].forms[0]
+        self.assertEqual(
+            comment_form.errors, {"mentions": ["Enter a valid mention list."]}
+        )
+        self.assertFalse(self.object.wagtail_admin_comments.exists())
+        self.assertFalse(CommentMention.objects.exists())
+        self.assertEqual(mail.outbox, [])
+
+    def test_cancel_with_invalid_reply_mention_leaves_workflow_active(self):
+        workflow_state = self.start_workflow()
+        ineligible_user = self.create_user(
+            "ineligible-reply", email="ineligible-reply@example.com"
+        )
+        reply_text, occurrence = self.mention(
+            ineligible_user,
+            prefix="Invalid reply for ",
+            key="0fdb333a-c141-46f3-824f-b873565b1678",
+        )
+
+        response = self.post(
+            "cancel-workflow",
+            self.comment_data(
+                text="Plain comment",
+                mentions=[],
+                reply_text=reply_text,
+                reply_mentions=[occurrence],
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        workflow_state.refresh_from_db()
+        self.assertEqual(workflow_state.status, WorkflowState.STATUS_IN_PROGRESS)
+        reply_form = (
+            response.context["form"]
+            .formsets["comments"]
+            .forms[0]
+            .formsets["replies"]
+            .forms[0]
+        )
+        self.assertEqual(
+            reply_form.errors, {"mentions": ["Enter a valid mention list."]}
+        )
+        self.assertFalse(self.object.wagtail_admin_comments.exists())
+        self.assertFalse(CommentMention.objects.exists())
+        self.assertEqual(mail.outbox, [])
+
+    def test_cancel_with_unrelated_page_error_still_cancels_workflow(self):
+        workflow_state = self.start_workflow()
+
+        response = self.post("cancel-workflow", {"title": ""})
+
+        self.assertEqual(response.status_code, 200)
+        workflow_state.refresh_from_db()
+        self.assertEqual(workflow_state.status, WorkflowState.STATUS_CANCELLED)
+
+    def test_submit_persists_comment_and_reply_mentions_after_commit(self):
+        target = self.add_mention_target("submit-success-target")
+        ordinary = self.add_ordinary_subscriber("submit-success-subscriber")
+        text, occurrence = self.mention(
+            target,
+            prefix="Submit comment for ",
+            key="ea02f412-464c-4780-b09f-9672609607ce",
+        )
+        reply_text, reply_occurrence = self.mention(
+            target,
+            prefix="Submit reply for ",
+            key="758183a0-d3a7-4502-ab43-e7bcdf83106e",
+        )
+        data = self.comment_data(
+            text=text,
+            mentions=[occurrence],
+            reply_text=reply_text,
+            reply_mentions=[reply_occurrence],
+        )
+        data["comment_notifications"] = "on"
+        log_pk = PageLogEntry.objects.filter(page=self.object).latest("pk").pk
+
+        with (
+            mock.patch(
+                "wagtail.admin.mail.EmailNotificationMixin.send_emails",
+                return_value=True,
+            ),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            response = self.post("submit", data)
+            self.assertEqual(mail.outbox, [])
+
+        self.assertRedirects(
+            response,
+            reverse("wagtailadmin_explore", args=[self.object.get_parent().pk]),
+        )
+        self.assertTrue(callbacks)
+        revision = self.assert_saved_comment_pair(
+            actor=self.submitter,
+            target=target,
+            ordinary_subscriber=ordinary,
+            comment_occurrence=occurrence,
+            reply_occurrence=reply_occurrence,
+            after_log_pk=log_pk,
+        )
+        state = self.object.current_workflow_state
+        self.assertEqual(state.status, WorkflowState.STATUS_IN_PROGRESS)
+        self.assertEqual(state.current_task_state.task_id, self.task_1.pk)
+        self.assertEqual(state.current_task_state.revision_id, revision.pk)
+
+    def test_restart_persists_comment_and_reply_mentions_after_commit(self):
+        self.workflow.start(self.object, user=self.submitter)
+        old_state = self.object.current_workflow_state
+        old_state.current_task_state.approve(user=self.superuser)
+        old_state.refresh_from_db()
+        old_state.current_task_state.reject(user=self.superuser)
+        old_state.refresh_from_db()
+        self.assertEqual(old_state.status, WorkflowState.STATUS_NEEDS_CHANGES)
+        mail.outbox = []
+        target = self.add_mention_target("restart-success-target")
+        ordinary = self.add_ordinary_subscriber("restart-success-subscriber")
+        text, occurrence = self.mention(
+            target,
+            prefix="Restart comment for ",
+            key="b7929100-a98c-4e86-bb9e-c898b13cd1ed",
+        )
+        reply_text, reply_occurrence = self.mention(
+            target,
+            prefix="Restart reply for ",
+            key="c9b14834-293e-4f0d-9af8-4c0100498292",
+        )
+        data = self.comment_data(
+            text=text,
+            mentions=[occurrence],
+            reply_text=reply_text,
+            reply_mentions=[reply_occurrence],
+        )
+        data["comment_notifications"] = "on"
+        log_pk = PageLogEntry.objects.filter(page=self.object).latest("pk").pk
+
+        with (
+            mock.patch(
+                "wagtail.admin.mail.EmailNotificationMixin.send_emails",
+                return_value=True,
+            ),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            response = self.post("restart-workflow", data)
+            self.assertEqual(mail.outbox, [])
+
+        self.assertRedirects(
+            response,
+            reverse("wagtailadmin_explore", args=[self.object.get_parent().pk]),
+        )
+        self.assertTrue(callbacks)
+        revision = self.assert_saved_comment_pair(
+            actor=self.submitter,
+            target=target,
+            ordinary_subscriber=ordinary,
+            comment_occurrence=occurrence,
+            reply_occurrence=reply_occurrence,
+            after_log_pk=log_pk,
+        )
+        old_state.refresh_from_db()
+        self.assertEqual(old_state.status, WorkflowState.STATUS_CANCELLED)
+        new_state = self.object.current_workflow_state
+        self.assertNotEqual(new_state.pk, old_state.pk)
+        self.assertEqual(new_state.status, WorkflowState.STATUS_IN_PROGRESS)
+        self.assertEqual(new_state.current_task_state.task_id, self.task_1.pk)
+        self.assertEqual(new_state.current_task_state.revision_id, revision.pk)
+
+    def test_workflow_action_persists_comment_and_reply_mentions_after_commit(self):
+        self.start_workflow()
+        target = self.add_mention_target("action-success-target")
+        ordinary = self.add_ordinary_subscriber("action-success-subscriber")
+        self.login(user=self.moderator)
+        text, occurrence = self.mention(
+            target,
+            prefix="Approval mention for ",
+            key="c3075a3c-d905-4f52-842e-33e4168aebd1",
+        )
+        reply_text, reply_occurrence = self.mention(
+            target,
+            prefix="Approval reply for ",
+            key="c75302b5-653e-40aa-9fee-226f87b5b05d",
+        )
+        data = self.comment_data(
+            text=text,
+            mentions=[occurrence],
+            reply_text=reply_text,
+            reply_mentions=[reply_occurrence],
+        )
+        data.update(
+            {
+                "workflow-action-name": "approve",
+                "workflow-action-extra-data": '{"comment": "approved"}',
+            }
+        )
+        log_pk = PageLogEntry.objects.filter(page=self.object).latest("pk").pk
+        old_task_state = self.object.current_workflow_task_state
+
+        with (
+            mock.patch(
+                "wagtail.admin.mail.EmailNotificationMixin.send_emails",
+                return_value=True,
+            ),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            response = self.post("workflow-action", data)
+            self.assertEqual(mail.outbox, [])
+
+        self.assertRedirects(
+            response,
+            reverse("wagtailadmin_explore", args=[self.object.get_parent().pk]),
+        )
+        self.assertTrue(callbacks)
+        revision = self.assert_saved_comment_pair(
+            actor=self.moderator,
+            target=target,
+            ordinary_subscriber=ordinary,
+            comment_occurrence=occurrence,
+            reply_occurrence=reply_occurrence,
+            after_log_pk=log_pk,
+        )
+        old_task_state.refresh_from_db()
+        self.assertEqual(old_task_state.status, old_task_state.STATUS_APPROVED)
+        state = self.object.current_workflow_state
+        self.assertEqual(state.status, WorkflowState.STATUS_IN_PROGRESS)
+        self.assertEqual(state.current_task_state.task_id, self.task_2.pk)
+        self.assertEqual(state.current_task_state.revision_id, revision.pk)
+
+    def test_cancel_persists_comment_and_reply_mentions_after_commit(self):
+        self.workflow.start(self.object, user=self.submitter)
+        self.object.refresh_from_db()
+        target = self.add_mention_target("cancel-success-target")
+        ordinary = self.submitter
+        self.login(user=self.moderator)
+        text, occurrence = self.mention(
+            target,
+            prefix="Cancel comment for ",
+            key="e249cfde-38f8-437e-87f9-750f81bb8ea1",
+        )
+        reply_text, reply_occurrence = self.mention(
+            target,
+            prefix="Cancel reply for ",
+            key="3a7901b7-aa4e-4aa4-9768-c602d0e67d18",
+        )
+        data = self.comment_data(
+            text=text,
+            mentions=[occurrence],
+            reply_text=reply_text,
+            reply_mentions=[reply_occurrence],
+        )
+        state = self.object.current_workflow_state
+        log_pk = PageLogEntry.objects.filter(page=self.object).latest("pk").pk
+        mail.outbox = []
+
+        with (
+            mock.patch(
+                "wagtail.admin.mail.EmailNotificationMixin.send_emails",
+                return_value=True,
+            ),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            response = self.post("cancel-workflow", data)
+            self.assertEqual(mail.outbox, [])
+
+        self.assertRedirects(response, self.get_url("edit"))
+        self.assertTrue(callbacks)
+        self.assert_saved_comment_pair(
+            actor=self.moderator,
+            target=target,
+            ordinary_subscriber=ordinary,
+            comment_occurrence=occurrence,
+            reply_occurrence=reply_occurrence,
+            after_log_pk=log_pk,
+        )
+        state.refresh_from_db()
+        self.assertEqual(state.status, WorkflowState.STATUS_CANCELLED)
+
+    def test_submit_rolls_back_lifecycle_when_scheduling_fails(self):
+        data = self.rollback_comment_data(
+            actor=self.submitter,
+            name="submit-rollback",
+            keys=(
+                "7ab7d720-b08c-41fe-8781-84eb07cbb8cd",
+                "4ebc647d-e7f4-45ed-9e16-1031e09e2b60",
+                "8177e643-45ac-4208-8375-a2b0bc68659d",
+                "36b0f776-adfc-4efd-9292-fcbaec646c54",
+            ),
+        )
+        snapshot = self.lifecycle_snapshot()
+        registrations = []
+        mail.outbox = []
+
+        with (
+            mock.patch(
+                "wagtail.admin.views.pages.edit.schedule_comment_notifications",
+                side_effect=self.scheduler_then_raise(registrations),
+            ),
+            mock.patch(
+                "wagtail.admin.mail.EmailNotificationMixin.send_emails",
+                return_value=True,
+            ),
+            self.assertRaisesMessage(RuntimeError, "scheduler failed"),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            self.post(
+                "submit",
+                data,
+            )
+
+        self.assert_lifecycle_snapshot(snapshot)
+        self.assertEqual(len(registrations), 1)
+        self.assertEqual(callbacks, [])
+
+    def test_restart_rolls_back_lifecycle_when_scheduling_fails(self):
+        self.workflow.start(self.object, user=self.submitter)
+        workflow_state = self.object.current_workflow_state
+        workflow_state.current_task_state.approve(user=self.superuser)
+        workflow_state.refresh_from_db()
+        workflow_state.current_task_state.reject(user=self.superuser)
+        workflow_state.refresh_from_db()
+        self.assertEqual(workflow_state.status, WorkflowState.STATUS_NEEDS_CHANGES)
+        mail.outbox = []
+        data = self.rollback_comment_data(
+            actor=self.submitter,
+            name="restart-rollback",
+            keys=(
+                "22e7a41e-456a-4ae6-b5fd-117a97b07ffd",
+                "77f1eb64-b857-4643-b02a-1d4c6018e9cc",
+                "996c4c34-027a-4505-98e9-379a73d29a59",
+                "3eed842c-7c21-4579-b6b5-02ab34454053",
+            ),
+        )
+        snapshot = self.lifecycle_snapshot()
+        registrations = []
+
+        with (
+            mock.patch(
+                "wagtail.admin.views.pages.edit.schedule_comment_notifications",
+                side_effect=self.scheduler_then_raise(registrations),
+            ),
+            mock.patch(
+                "wagtail.admin.mail.EmailNotificationMixin.send_emails",
+                return_value=True,
+            ),
+            self.assertRaisesMessage(RuntimeError, "scheduler failed"),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            self.post(
+                "restart-workflow",
+                data,
+            )
+
+        self.assert_lifecycle_snapshot(snapshot)
+        self.assertEqual(len(registrations), 1)
+        self.assertEqual(callbacks, [])
+
+    def test_workflow_action_rolls_back_lifecycle_when_scheduling_fails(self):
+        self.start_workflow()
+        self.login(user=self.moderator)
+        data = self.rollback_comment_data(
+            actor=self.moderator,
+            name="action-rollback",
+            keys=(
+                "604ae6d5-a061-453b-8bb3-cba3c290a011",
+                "f66b4c95-20c5-476b-ac6e-55665b4cfe36",
+                "fb964066-0ac3-49ca-852f-68af261c8157",
+                "18e90428-2438-4cb5-82db-ef7383916736",
+            ),
+        )
+        data.update(
+            {
+                "workflow-action-name": "approve",
+                "workflow-action-extra-data": '{"comment": "rolled back"}',
+            }
+        )
+        snapshot = self.lifecycle_snapshot()
+        registrations = []
+        mail.outbox = []
+
+        with (
+            mock.patch(
+                "wagtail.admin.views.pages.edit.schedule_comment_notifications",
+                side_effect=self.scheduler_then_raise(registrations),
+            ),
+            mock.patch(
+                "wagtail.admin.mail.EmailNotificationMixin.send_emails",
+                return_value=True,
+            ),
+            self.assertRaisesMessage(RuntimeError, "scheduler failed"),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            self.post("workflow-action", data)
+
+        self.assert_lifecycle_snapshot(snapshot)
+        self.assertEqual(len(registrations), 1)
+        self.assertEqual(callbacks, [])
+
+    def test_cancel_rolls_back_lifecycle_when_scheduling_fails(self):
+        self.workflow.start(self.object, user=self.submitter)
+        self.object.refresh_from_db()
+        mail.outbox = []
+        self.login(user=self.moderator)
+        data = self.rollback_comment_data(
+            actor=self.moderator,
+            name="cancel-rollback",
+            keys=(
+                "5fbdb342-0e17-4800-837b-7180734ac89b",
+                "faab0889-0e86-4d64-97c6-c30d2f410755",
+                "f91d4610-fe63-451c-9620-998886187795",
+                "6683fe8b-62a5-4364-bea5-b299c715b2e5",
+            ),
+        )
+        snapshot = self.lifecycle_snapshot()
+        registrations = []
+        mail.outbox = []
+
+        with (
+            mock.patch(
+                "wagtail.admin.views.pages.edit.schedule_comment_notifications",
+                side_effect=self.scheduler_then_raise(registrations),
+            ),
+            mock.patch(
+                "wagtail.admin.mail.EmailNotificationMixin.send_emails",
+                return_value=True,
+            ),
+            self.assertRaisesMessage(RuntimeError, "scheduler failed"),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            self.post(
+                "cancel-workflow",
+                data,
+            )
+
+        self.assert_lifecycle_snapshot(snapshot)
+        self.assertEqual(len(registrations), 1)
+        self.assertEqual(callbacks, [])
 
 
 class BaseSnippetWorkflowTests(BasePageWorkflowTests):

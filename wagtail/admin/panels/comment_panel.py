@@ -15,9 +15,9 @@ class CommentPanel(Panel):
                 COMMENTS_RELATION_NAME: {
                     "formset": CommentFormSet,
                     "form": CommentForm,
-                    "fields": ["text", "contentpath", "position"],
+                    "fields": ["text", "contentpath", "position", "mentions"],
                     "formset_name": "comments",
-                    "inherit_kwargs": ["for_user"],
+                    "inherit_kwargs": ["for_user", "parent_page"],
                 }
             },
         }

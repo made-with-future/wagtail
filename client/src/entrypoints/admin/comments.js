@@ -350,6 +350,20 @@ window.comments = (() => {
     }
   });
 
+  document.addEventListener(
+    'w-autosave:save',
+    () => {
+      commentApp.captureSubmittedPositions();
+    },
+    { capture: true },
+  );
+
+  document.addEventListener('w-autosave:error', ({ detail }) => {
+    if (detail?.response?.comments) {
+      commentApp.hydrateRejectedData(detail.response.comments);
+    }
+  });
+
   return {
     commentApp,
     getContentPath,

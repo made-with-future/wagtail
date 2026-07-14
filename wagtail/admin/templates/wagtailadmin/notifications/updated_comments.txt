@@ -2,7 +2,14 @@
 {% load i18n wagtailadmin_tags %}
 {% base_url_setting default="" as base_url %}
 
-{% block content %}{% blocktrans trimmed with title=page.get_admin_display_title|safe editor=editor|user_display_name|safe %}{{ editor }} has updated comments on "{{ title }}".{% endblocktrans %}
+{% block content %}{% if mentioned_comments or mentioned_replies %}{% blocktrans trimmed with title=page.get_admin_display_title|safe editor=editor|user_display_name|safe %}{{ editor }} mentioned you in comments on "{{ title }}".{% endblocktrans %}{% else %}{% blocktrans trimmed with title=page.get_admin_display_title|safe editor=editor|user_display_name|safe %}{{ editor }} has updated comments on "{{ title }}".{% endblocktrans %}{% endif %}{% if mentioned_comments or mentioned_replies %}
+{% spaceless %}
+
+{% endspaceless %}
+
+{% trans "Mentions:" %}{% for comment in mentioned_comments %}
+ - {% blocktrans trimmed with text=comment.text|safe %}Comment: "{{ text }}"{% endblocktrans %}{% endfor %}{% for mention in mentioned_replies %}
+ - {% blocktrans trimmed with comment=mention.comment.text|safe reply=mention.reply.text|safe %}Reply to "{{ comment }}": "{{ reply }}"{% endblocktrans %}{% endfor %}{% endif %}
 {% spaceless %}
 
 {% endspaceless %}{% if new_comments %}

@@ -4,8 +4,20 @@
 
 {% block content %}
     <p>
-        {% blocktrans trimmed with title=page.get_admin_display_title editor=editor|user_display_name %}{{ editor }} has updated comments on "{{ title }}".{% endblocktrans %}
-    </p>
+        {% if mentioned_comments or mentioned_replies %}{% blocktrans trimmed with title=page.get_admin_display_title editor=editor|user_display_name %}{{ editor }} mentioned you in comments on "{{ title }}".{% endblocktrans %}{% else %}{% blocktrans trimmed with title=page.get_admin_display_title editor=editor|user_display_name %}{{ editor }} has updated comments on "{{ title }}".{% endblocktrans %}{% endif %}
+    </p>{% if mentioned_comments or mentioned_replies %}
+
+        <h3>{% trans "Mentions" %}</h3>
+
+        <ul>
+            {% for comment in mentioned_comments %}
+                <li>{% blocktrans trimmed with text=comment.text %}Comment: "{{ text }}"{% endblocktrans %}</li>
+            {% endfor %}
+            {% for mention in mentioned_replies %}
+                <li>{% blocktrans trimmed with comment=mention.comment.text reply=mention.reply.text %}Reply to "{{ comment }}": "{{ reply }}"{% endblocktrans %}</li>
+            {% endfor %}
+        </ul>
+    {% endif %}
 
     {% if new_comments %}
         <h3>{% trans "New comments" %}</h3>

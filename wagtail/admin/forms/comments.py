@@ -1,18 +1,59 @@
+from django import forms
 from django.contrib.auth import get_user_model
-from django.forms import BooleanField, ValidationError
+from django.forms import ValidationError
+from django.urls import reverse
 from django.utils.timezone import now
 from django.utils.translation import gettext as _
 from modelcluster.forms import BaseChildFormSet
 from modelcluster.models import get_serializable_data_for_fields
 
+from wagtail.admin.comment_mentions import (
+    InvalidMentionTargets,
+    current_mention_email,
+    future_page_mention_candidates,
+    page_mention_candidates,
+    resolve_new_mention_users,
+    sync_message_mention_lookups,
+)
 from wagtail.admin.templatetags.wagtailadmin_tags import avatar_url, user_display_name
 
+from .comment_mentions import (
+    CanonicalCommentTextField,
+    CommentMentionsField,
+    MentionedMessageFormMixin,
+)
 from .models import WagtailAdminModelForm
 
 
-class CommentReplyForm(WagtailAdminModelForm):
+def serialized_mentions(form, *, bound):
+    if (
+        bound
+        and form.mention_changes.added
+        and not getattr(form, "new_mentions_validated", False)
+    ):
+        return list(form.initial["mentions"])
+    return form.serialized_mentions(bound=bound)
+
+
+def serialized_mentioned_user_ids(form, mentions, *, bound):
+    rejected_keys = (
+        {occurrence["key"] for occurrence in form.mention_changes.added}
+        if bound and hasattr(form, "invalid_target_mentions")
+        else set()
+    )
+    return {
+        occurrence["user_id"]
+        for occurrence in mentions
+        if occurrence["key"] not in rejected_keys
+    }
+
+
+class CommentReplyForm(MentionedMessageFormMixin, WagtailAdminModelForm):
+    text = CanonicalCommentTextField()
+    mentions = CommentMentionsField(required=False)
+
     class Meta:
-        fields = ("text",)
+        fields = ("text", "mentions")
 
     def clean(self):
         cleaned_data = super().clean()
@@ -32,22 +73,36 @@ class CommentReplyForm(WagtailAdminModelForm):
 
     def serialize(self, bound):
         data = get_serializable_data_for_fields(self.instance)
+        data["user"] = (
+            str(self.instance.user_id) if self.instance.user_id is not None else None
+        )
+        mentions = serialized_mentions(self, bound=bound)
+        data["mentions"] = mentions
+        if bound and "mentions" in self.errors:
+            data["mention_error"] = str(self.mention_validation_error)
         data["deleted"] = self.cleaned_data.get("DELETE", False) if bound else False
-        return data, {self.instance.user_id}
+        mentioned_user_ids = serialized_mentioned_user_ids(self, mentions, bound=bound)
+        return (
+            data,
+            {self.instance.user_id},
+            mentioned_user_ids,
+        )
 
 
-class CommentForm(WagtailAdminModelForm):
+class CommentForm(MentionedMessageFormMixin, WagtailAdminModelForm):
     """
     This is designed to be subclassed and have the user overridden to enable user-based validation within the edit handler system
     """
 
-    resolved = BooleanField(required=False)
+    text = CanonicalCommentTextField()
+    resolved = forms.BooleanField(required=False)
+    mentions = CommentMentionsField(required=False)
 
     class Meta:
         formsets = {
             "replies": {
                 "form": CommentReplyForm,
-                "inherit_kwargs": ["for_user"],
+                "inherit_kwargs": ["for_user", "page", "parent_page"],
             }
         }
 
@@ -82,29 +137,47 @@ class CommentForm(WagtailAdminModelForm):
         else:
             self.instance.resolved_by = None
             self.instance.resolved_at = None
+
         return super().save(*args, **kwargs)
 
     def serialize(self, bound):
         user_pks = {self.instance.user_id}
+        mentioned_user_ids = set()
         replies = []
         for reply_form in self.formsets["replies"].forms:
-            reply_data, reply_user_pks = reply_form.serialize(bound)
+            reply_data, reply_user_pks, reply_mentioned_user_ids = reply_form.serialize(
+                bound
+            )
             replies.append(reply_data)
             user_pks.update(reply_user_pks)
+            mentioned_user_ids.update(reply_mentioned_user_ids)
 
         data = get_serializable_data_for_fields(self.instance)
+        data["user"] = (
+            str(self.instance.user_id) if self.instance.user_id is not None else None
+        )
         data["deleted"] = self.cleaned_data.get("DELETE", False) if bound else False
         data["resolved"] = (
             self.cleaned_data.get("resolved", False)
             if bound
             else self.instance.resolved_at is not None
         )
+        mentions = serialized_mentions(self, bound=bound)
+        data["mentions"] = mentions
+        if bound and "mentions" in self.errors:
+            data["mention_error"] = str(self.mention_validation_error)
+        mentioned_user_ids.update(
+            serialized_mentioned_user_ids(self, mentions, bound=bound)
+        )
         data["replies"] = replies
-        return data, user_pks
+        return data, user_pks, mentioned_user_ids
 
 
 class CommentFormSet(BaseChildFormSet):
     def __init__(self, *args, **kwargs):
+        form_kwargs = kwargs.get("form_kwargs") or {}
+        self.for_user = form_kwargs.get("for_user")
+        self.parent_page = form_kwargs.get("parent_page")
         super().__init__(*args, **kwargs)
         valid_comment_ids = [
             comment.id
@@ -113,28 +186,166 @@ class CommentFormSet(BaseChildFormSet):
         ]
         self.queryset = self.queryset.filter(id__in=valid_comment_ids)
 
+    def get_form_kwargs(self, index):
+        kwargs = super().get_form_kwargs(index)
+        kwargs["page"] = self.instance
+        return kwargs
+
+    def clean(self):
+        super().clean()
+        if not any(
+            form.mention_changes.added
+            for form in self.iter_mention_forms(valid_only=True)
+        ):
+            return
+        if self.instance.pk:
+            candidates = page_mention_candidates(self.instance)
+        else:
+            candidates = future_page_mention_candidates(
+                parent_page=self.parent_page,
+                owner=self.for_user,
+            )
+
+        try:
+            self.validate_new_mentions(candidates)
+        except InvalidMentionTargets:
+            pass
+
+    def iter_mention_forms(self, *, include_deleted=False, valid_only=False):
+        for comment_form in self.forms:
+            comment_deleted = comment_form.cleaned_data.get("DELETE", False)
+            if (include_deleted or not comment_deleted) and (
+                not valid_only or not comment_form.errors
+            ):
+                yield comment_form
+
+            if comment_deleted and not include_deleted:
+                continue
+            replies = comment_form.formsets.get("replies")
+            if replies is None:
+                continue
+            for reply_form in replies.forms:
+                reply_deleted = reply_form.cleaned_data.get("DELETE", False)
+                if (include_deleted or not reply_deleted) and (
+                    not valid_only or not reply_form.errors
+                ):
+                    yield reply_form
+
+    def validate_new_mentions(self, candidates):
+        occurrence_forms = [
+            (form, occurrence)
+            for form in self.iter_mention_forms(valid_only=True)
+            for occurrence in form.mention_changes.added
+        ]
+        if not occurrence_forms:
+            return ()
+
+        try:
+            mentioned_users = resolve_new_mention_users(
+                [occurrence for form, occurrence in occurrence_forms],
+                candidates,
+            )
+        except InvalidMentionTargets as error:
+            for form, _ in occurrence_forms:
+                form.new_mentions_validated = True
+            invalid_forms = []
+            for index in error.invalid_indices:
+                form = occurrence_forms[index][0]
+                if form not in invalid_forms:
+                    invalid_forms.append(form)
+            for form in invalid_forms:
+                form.invalid_target_mentions = list(form.cleaned_data["mentions"])
+                form.add_error("mentions", form.mention_validation_error)
+            raise
+        for form, _ in occurrence_forms:
+            form.new_mentions_validated = True
+        return mentioned_users
+
+    def revalidate_new_mentions_for_page(self, page):
+        self.validate_new_mentions(page_mention_candidates(page))
+
+    def sync_mention_lookups(self):
+        deleted_comment_forms = set(self.deleted_forms)
+        for form in self.forms:
+            if form in deleted_comment_forms:
+                continue
+            if form.instance.pk:
+                sync_message_mention_lookups(
+                    message=form.instance,
+                    occurrences=form.cleaned_data["mentions"],
+                )
+            replies = form.formsets["replies"]
+            deleted_reply_forms = set(replies.deleted_forms)
+            for reply_form in replies.forms:
+                if reply_form not in deleted_reply_forms and reply_form.instance.pk:
+                    sync_message_mention_lookups(
+                        message=reply_form.instance,
+                        occurrences=reply_form.cleaned_data["mentions"],
+                    )
+
     def serialize(self, bound: bool, user):
         def user_data(user):
-            return {"name": user_display_name(user), "avatar_url": avatar_url(user)}
+            return {
+                "name": user_display_name(user),
+                "avatar_url": avatar_url(user),
+            }
 
         user_pks = {user.pk}
+        mentioned_user_ids = set()
         serialized_comments = []
         for form in self.forms:
             # iterate over comments to retrieve users (to get display names) and serialized versions
-            data, comment_user_pks = form.serialize(bound)
+            data, comment_user_pks, comment_mentioned_user_ids = form.serialize(bound)
             serialized_comments.append(data)
             user_pks.update(comment_user_pks)
+            mentioned_user_ids.update(comment_mentioned_user_ids)
 
         authors = {
-            str(user.pk): user_data(user)
-            for user in get_user_model()
-            .objects.filter(pk__in=user_pks)
+            str(author.pk): user_data(author)
+            for author in get_user_model()
+            ._default_manager.filter(pk__in=user_pks)
             .select_related("wagtail_userprofile")
         }
 
+        user_model = get_user_model()
+        pk_field = user_model._meta.pk
+        mentioned_users = list(
+            user_model._default_manager.filter(pk__in=mentioned_user_ids)
+        )
+        users_by_prepared_id = {
+            str(pk_field.get_prep_value(mentioned_user.pk)): mentioned_user
+            for mentioned_user in mentioned_users
+        }
+        mentioned_users_data = {}
+        for mention_user_id in mentioned_user_ids:
+            try:
+                parsed_user_id = pk_field.to_python(mention_user_id)
+                prepared_user_id = str(pk_field.get_prep_value(parsed_user_id))
+            except (OverflowError, TypeError, ValueError, ValidationError):
+                continue
+            if mentioned_user := users_by_prepared_id.get(prepared_user_id):
+                mentioned_users_data[mention_user_id] = {
+                    "email": current_mention_email(mentioned_user)
+                }
+
         comments_data = {
             "comments": serialized_comments,
-            "user": user.pk,
+            "user": str(user.pk),
             "authors": authors,
+            "mentioned_users": mentioned_users_data,
         }
+        if self.instance.pk is not None:
+            comments_data["mention_suggestions_url"] = reverse(
+                "wagtailadmin_pages:comment_mention_suggestions",
+                args=[self.instance.pk],
+            )
+        elif self.parent_page is not None:
+            comments_data["mention_suggestions_url"] = reverse(
+                "wagtailadmin_pages:create_comment_mention_suggestions",
+                args=[
+                    self.instance._meta.app_label,
+                    self.instance._meta.model_name,
+                    self.parent_page.pk,
+                ],
+            )
         return comments_data

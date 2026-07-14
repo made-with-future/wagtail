@@ -1,12 +1,14 @@
 import datetime
 import json
 import os
+import re
 from unittest import mock
 
 from django.conf import settings
 from django.contrib.auth.models import Group, Permission
 from django.core import mail
 from django.core.files.base import ContentFile
+from django.db import connection
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.test import TestCase, modify_settings, override_settings
 from django.urls import reverse
@@ -15,11 +17,16 @@ from django.utils.translation import gettext_lazy as _
 
 from wagtail.admin.action_menu import ActionMenuItem, PublishMenuItem
 from wagtail.admin.admin_url_finder import AdminURLFinder
+from wagtail.admin.comment_notifications import (
+    schedule_comment_notifications as real_schedule_comment_notifications,
+)
 from wagtail.admin.models import EditingSession
 from wagtail.exceptions import PageClassNotFoundError
 from wagtail.models import (
     Comment,
+    CommentMention,
     CommentReply,
+    CommentReplyMention,
     GroupPagePermission,
     Locale,
     Page,
@@ -632,6 +639,7 @@ class TestPageEdit(WagtailTestUtils, TestCase):
                 "comments": [],
                 "user": str(self.user.pk),
                 "authors": {},
+                "mentioned_users": {},
             },
         )
 
@@ -4494,6 +4502,933 @@ class TestCommenting(WagtailTestUtils, TestCase):
             [to for email in mail.outbox for to in email.to],
         )
 
+    def add_page_editor(self, username, **kwargs):
+        user = self.create_user(username, **kwargs)
+        group = Group.objects.create(name=f"{username} page editors")
+        group.permissions.add(
+            Permission.objects.get(
+                content_type__app_label="wagtailadmin", codename="access_admin"
+            )
+        )
+        group.user_set.add(user)
+        GroupPagePermission.objects.create(
+            group=group, page=self.child_page, permission_type="change"
+        )
+        return user
+
+    def mention(self, user, *, prefix, key):
+        label = f"@{user.email}"
+        text = f"{prefix}{label}"
+        return text, {
+            "key": key,
+            "user_id": str(user.pk),
+            "start": len(prefix),
+            "end": len(text),
+            "label": label,
+        }
+
+    def scheduler_then_raise(self, registrations):
+        def schedule(*, page, editor, changes):
+            before = len(connection.run_on_commit)
+            real_schedule_comment_notifications(
+                page=page,
+                editor=editor,
+                changes=changes,
+            )
+            registered = connection.run_on_commit[before:]
+            self.assertEqual(len(registered), 1)
+            registrations.extend(item[1] for item in registered)
+            raise RuntimeError("scheduler failed")
+
+        return schedule
+
+    def comment_post_data(
+        self,
+        *,
+        comment_text,
+        comment_mentions,
+        reply_text=None,
+        reply_mentions=(),
+        action=None,
+    ):
+        data = {
+            "title": "I've been edited!",
+            "content": "Some content",
+            "slug": "hello-world",
+            "comments-TOTAL_FORMS": "1",
+            "comments-INITIAL_FORMS": "0",
+            "comments-MIN_NUM_FORMS": "0",
+            "comments-MAX_NUM_FORMS": "",
+            "comments-0-DELETE": "",
+            "comments-0-resolved": "",
+            "comments-0-id": "",
+            "comments-0-contentpath": "title",
+            "comments-0-text": comment_text,
+            "comments-0-mentions": json.dumps(comment_mentions),
+            "comments-0-position": "",
+            "comments-0-replies-TOTAL_FORMS": "1" if reply_text else "0",
+            "comments-0-replies-INITIAL_FORMS": "0",
+            "comments-0-replies-MIN_NUM_FORMS": "0",
+            "comments-0-replies-MAX_NUM_FORMS": "0",
+        }
+        if reply_text:
+            data.update(
+                {
+                    "comments-0-replies-0-id": "",
+                    "comments-0-replies-0-DELETE": "",
+                    "comments-0-replies-0-text": reply_text,
+                    "comments-0-replies-0-mentions": json.dumps(reply_mentions),
+                }
+            )
+        if action:
+            data[action] = "True"
+        return data
+
+    def existing_comment_post_data(
+        self,
+        *,
+        comment,
+        reply=None,
+        comment_notifications=True,
+        action=None,
+    ):
+        self.child_page.refresh_from_db()
+        data = {
+            "title": self.child_page.title,
+            "content": self.child_page.content,
+            "slug": self.child_page.slug,
+            "comments-TOTAL_FORMS": "1",
+            "comments-INITIAL_FORMS": "1",
+            "comments-MIN_NUM_FORMS": "0",
+            "comments-MAX_NUM_FORMS": "",
+            "comments-0-DELETE": "",
+            "comments-0-resolved": "",
+            "comments-0-id": str(comment.pk),
+            "comments-0-contentpath": comment.contentpath,
+            "comments-0-text": comment.text,
+            "comments-0-mentions": json.dumps(comment.mentions),
+            "comments-0-position": "",
+            "comments-0-replies-TOTAL_FORMS": "1" if reply else "0",
+            "comments-0-replies-INITIAL_FORMS": "1" if reply else "0",
+            "comments-0-replies-MIN_NUM_FORMS": "0",
+            "comments-0-replies-MAX_NUM_FORMS": "0",
+        }
+        if reply:
+            data.update(
+                {
+                    "comments-0-replies-0-id": str(reply.pk),
+                    "comments-0-replies-0-DELETE": "",
+                    "comments-0-replies-0-text": reply.text,
+                    "comments-0-replies-0-mentions": json.dumps(reply.mentions),
+                }
+            )
+        if comment_notifications:
+            data["comment_notifications"] = "on"
+        if action:
+            data[action] = "True"
+        return data
+
+    def lifecycle_snapshot(self):
+        self.child_page.refresh_from_db()
+        return {
+            "title": self.child_page.title,
+            "content": self.child_page.content,
+            "live": self.child_page.live,
+            "has_unpublished_changes": self.child_page.has_unpublished_changes,
+            "latest_revision_id": self.child_page.latest_revision_id,
+            "live_revision_id": self.child_page.live_revision_id,
+            "revision_count": self.child_page.revisions.count(),
+            "comments": list(
+                Comment.objects.filter(page=self.child_page)
+                .order_by("pk")
+                .values("pk", "text", "mentions", "contentpath")
+            ),
+            "replies": list(
+                CommentReply.objects.filter(comment__page=self.child_page)
+                .order_by("pk")
+                .values("pk", "text", "mentions")
+            ),
+            "comment_mentions": list(
+                CommentMention.objects.filter(comment__page=self.child_page)
+                .order_by("comment_id", "user_id")
+                .values_list("comment_id", "user_id")
+            ),
+            "reply_mentions": list(
+                CommentReplyMention.objects.filter(reply__comment__page=self.child_page)
+                .order_by("reply_id", "user_id")
+                .values_list("reply_id", "user_id")
+            ),
+            "subscriptions": list(
+                PageSubscription.objects.filter(page=self.child_page)
+                .order_by("user_id")
+                .values_list("user_id", "comment_notifications")
+            ),
+            "logs": list(
+                PageLogEntry.objects.filter(page=self.child_page)
+                .order_by("pk")
+                .values("pk", "action", "revision_id", "data")
+            ),
+        }
+
+    def rollback_edit_data(self, *, name, keys, action=None):
+        old_target = self.add_page_editor(
+            f"{name}-old", email=f"{name}-old@example.com"
+        )
+        new_target = self.add_page_editor(
+            f"{name}-new", email=f"{name}-new@example.com"
+        )
+        old_comment_text, old_comment_occurrence = self.mention(
+            old_target,
+            prefix="Original comment for ",
+            key=keys[0],
+        )
+        old_reply_text, old_reply_occurrence = self.mention(
+            old_target,
+            prefix="Original reply for ",
+            key=keys[1],
+        )
+        comment = Comment.objects.create(
+            page=self.child_page,
+            user=self.user,
+            text=old_comment_text,
+            mentions=[old_comment_occurrence],
+            contentpath="title",
+        )
+        reply = CommentReply.objects.create(
+            comment=comment,
+            user=self.user,
+            text=old_reply_text,
+            mentions=[old_reply_occurrence],
+        )
+        CommentMention.objects.create(comment=comment, user=old_target)
+        CommentReplyMention.objects.create(reply=reply, user=old_target)
+
+        new_comment_text, new_comment_occurrence = self.mention(
+            new_target,
+            prefix="Changed comment for ",
+            key=keys[2],
+        )
+        new_reply_text, new_reply_occurrence = self.mention(
+            new_target,
+            prefix="Changed reply for ",
+            key=keys[3],
+        )
+        comment.text = new_comment_text
+        comment.mentions = [new_comment_occurrence]
+        reply.text = new_reply_text
+        reply.mentions = [new_reply_occurrence]
+        data = self.existing_comment_post_data(
+            comment=comment,
+            reply=reply,
+            comment_notifications=False,
+            action=action,
+        )
+        data.update(
+            {
+                "title": f"{name} changed title",
+                "content": f"{name} changed content",
+            }
+        )
+        return data
+
+    def assert_saved_comment_pair(
+        self,
+        *,
+        comment,
+        reply,
+        target,
+        comment_occurrences,
+        reply_occurrences,
+        actions,
+        recipients,
+        after_log_pk=0,
+    ):
+        comment.refresh_from_db()
+        reply.refresh_from_db()
+        self.assertEqual(comment.mentions, comment_occurrences)
+        self.assertEqual(reply.mentions, reply_occurrences)
+        self.assertEqual(
+            set(
+                CommentMention.objects.filter(comment=comment).values_list(
+                    "user_id", flat=True
+                )
+            ),
+            {target.pk},
+        )
+        self.assertEqual(
+            set(
+                CommentReplyMention.objects.filter(reply=reply).values_list(
+                    "user_id", flat=True
+                )
+            ),
+            {target.pk},
+        )
+        self.child_page.refresh_from_db()
+        revision = self.child_page.get_latest_revision()
+        self.assertCountEqual(
+            PageLogEntry.objects.filter(
+                page=self.child_page,
+                pk__gt=after_log_pk,
+                action__in=actions,
+            ).values_list("action", "revision_id"),
+            [(action, revision.pk) for action in actions],
+        )
+        actual_recipients = {
+            recipient for message in mail.outbox for recipient in message.to
+        }
+        self.assertEqual(actual_recipients, set(recipients))
+        self.assertNotIn(self.user.email, actual_recipients)
+
+    def test_save_persists_comment_and_reply_mentions_after_commit(self):
+        mentioned_user = self.add_page_editor(
+            "lifecycle-mentioned", email="lifecycle-mentioned@example.com"
+        )
+        comment_text, comment_occurrence = self.mention(
+            mentioned_user,
+            prefix="Comment for ",
+            key="7c719462-4289-46db-bc17-54fc6b1f2561",
+        )
+        repeated_label = comment_occurrence["label"]
+        repeated_start = len(comment_text) + len(" and ")
+        comment_text = f"{comment_text} and {repeated_label}"
+        repeated_occurrence = {
+            "key": "66c19c57-8fb9-45a7-8c2a-b5125c838357",
+            "user_id": str(mentioned_user.pk),
+            "start": repeated_start,
+            "end": len(comment_text),
+            "label": repeated_label,
+        }
+        reply_text, reply_occurrence = self.mention(
+            mentioned_user,
+            prefix="Reply for ",
+            key="53a0ca39-28b2-4fc5-b71d-379626a7f442",
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+                self.comment_post_data(
+                    comment_text=comment_text,
+                    comment_mentions=[comment_occurrence, repeated_occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                ),
+            )
+            self.assertEqual(mail.outbox, [])
+
+        self.assertRedirects(
+            response,
+            reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+        )
+        comment = self.child_page.wagtail_admin_comments.get()
+        reply = comment.replies.get()
+        self.assertEqual(comment.mentions, [comment_occurrence, repeated_occurrence])
+        self.assertEqual(reply.mentions, [reply_occurrence])
+        self.assertEqual(
+            set(
+                CommentMention.objects.filter(comment=comment).values_list(
+                    "user_id", flat=True
+                )
+            ),
+            {mentioned_user.pk},
+        )
+        self.assertEqual(
+            set(
+                CommentReplyMention.objects.filter(reply=reply).values_list(
+                    "user_id", flat=True
+                )
+            ),
+            {mentioned_user.pk},
+        )
+        self.assertEqual(
+            {recipient for message in mail.outbox for recipient in message.to},
+            {self.subscriber.email, mentioned_user.email},
+        )
+        self.assertNotIn(
+            self.user.email,
+            {recipient for message in mail.outbox for recipient in message.to},
+        )
+        self.child_page.refresh_from_db()
+        revision = self.child_page.get_latest_revision()
+        self.assertCountEqual(
+            PageLogEntry.objects.filter(
+                page=self.child_page,
+                action__in=[
+                    "wagtail.comments.create",
+                    "wagtail.comments.create_reply",
+                ],
+            ).values_list("action", "revision_id"),
+            [
+                ("wagtail.comments.create", revision.pk),
+                ("wagtail.comments.create_reply", revision.pk),
+            ],
+        )
+
+    def test_json_save_and_overwrite_persist_comment_and_reply_mentions(self):
+        first_target = self.add_page_editor(
+            "json-first-target", email="json-first-target@example.com"
+        )
+        first_comment_text, first_comment_occurrence = self.mention(
+            first_target,
+            prefix="JSON comment for ",
+            key="dd4e1f21-6bb2-43b1-bc09-b4684e1e4bf9",
+        )
+        first_reply_text, first_reply_occurrence = self.mention(
+            first_target,
+            prefix="JSON reply for ",
+            key="ff0e0afe-cb3e-4ec5-a491-82d6491962ab",
+        )
+        first_log_pk = PageLogEntry.objects.filter(page=self.child_page).latest("pk").pk
+
+        with self.captureOnCommitCallbacks(execute=True) as callbacks:
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+                self.comment_post_data(
+                    comment_text=first_comment_text,
+                    comment_mentions=[first_comment_occurrence],
+                    reply_text=first_reply_text,
+                    reply_mentions=[first_reply_occurrence],
+                ),
+                headers={"Accept": "application/json"},
+            )
+            self.assertEqual(mail.outbox, [])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["success"])
+        self.assertTrue(callbacks)
+        comment = self.child_page.wagtail_admin_comments.get()
+        reply = comment.replies.get()
+        self.assertEqual(
+            response.json()["comments"]["comments"][0]["mentions"],
+            [first_comment_occurrence],
+        )
+        self.assertEqual(
+            response.json()["comments"]["comments"][0]["replies"][0]["mentions"],
+            [first_reply_occurrence],
+        )
+        self.assert_saved_comment_pair(
+            comment=comment,
+            reply=reply,
+            target=first_target,
+            comment_occurrences=[first_comment_occurrence],
+            reply_occurrences=[first_reply_occurrence],
+            actions={"wagtail.comments.create", "wagtail.comments.create_reply"},
+            recipients={self.subscriber.email, first_target.email},
+            after_log_pk=first_log_pk,
+        )
+        overwritten_revision = self.child_page.get_latest_revision()
+        revision_count = self.child_page.revisions.count()
+
+        second_target = self.add_page_editor(
+            "json-second-target", email="json-second-target@example.com"
+        )
+        second_comment_text, second_comment_occurrence = self.mention(
+            second_target,
+            prefix="Overwritten comment for ",
+            key="26def2c2-e56b-41b5-9b30-cf43c42b9c82",
+        )
+        second_reply_text, second_reply_occurrence = self.mention(
+            second_target,
+            prefix="Overwritten reply for ",
+            key="c08705e1-b56c-4a68-8b41-103438e6382c",
+        )
+        comment.text = second_comment_text
+        comment.mentions = [second_comment_occurrence]
+        reply.text = second_reply_text
+        reply.mentions = [second_reply_occurrence]
+        data = self.existing_comment_post_data(comment=comment, reply=reply)
+        data.update(
+            {
+                "title": "JSON overwritten title",
+                "content": "JSON overwritten content",
+                "overwrite_revision_id": str(overwritten_revision.pk),
+            }
+        )
+        second_log_pk = (
+            PageLogEntry.objects.filter(page=self.child_page).latest("pk").pk
+        )
+        mail.outbox = []
+
+        with self.captureOnCommitCallbacks(execute=True) as callbacks:
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+                data,
+                headers={"Accept": "application/json"},
+            )
+            self.assertEqual(mail.outbox, [])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["revision_id"], overwritten_revision.pk)
+        self.assertEqual(self.child_page.revisions.count(), revision_count)
+        self.assertTrue(callbacks)
+        self.assert_saved_comment_pair(
+            comment=comment,
+            reply=reply,
+            target=second_target,
+            comment_occurrences=[second_comment_occurrence],
+            reply_occurrences=[second_reply_occurrence],
+            actions={"wagtail.comments.edit", "wagtail.comments.edit_reply"},
+            recipients={second_target.email},
+            after_log_pk=second_log_pk,
+        )
+
+    def test_publish_persists_comment_and_reply_mentions_after_commit(self):
+        target = self.add_page_editor(
+            "edit-publish-target", email="edit-publish-target@example.com"
+        )
+        comment_text, comment_occurrence = self.mention(
+            target,
+            prefix="Publish comment for ",
+            key="d16fea86-a168-47de-9197-680ff3beb329",
+        )
+        reply_text, reply_occurrence = self.mention(
+            target,
+            prefix="Publish reply for ",
+            key="1ce115b8-4774-4678-8903-42271dacb173",
+        )
+        first_log_pk = PageLogEntry.objects.filter(page=self.child_page).latest("pk").pk
+
+        with self.captureOnCommitCallbacks(execute=True) as callbacks:
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+                self.comment_post_data(
+                    comment_text=comment_text,
+                    comment_mentions=[comment_occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                    action="action-publish",
+                ),
+            )
+            self.assertEqual(mail.outbox, [])
+
+        self.assertRedirects(
+            response,
+            reverse("wagtailadmin_explore", args=[self.root_page.pk]),
+        )
+        self.assertTrue(callbacks)
+        self.child_page.refresh_from_db()
+        self.assertTrue(self.child_page.live)
+        self.assertFalse(self.child_page.has_unpublished_changes)
+        self.assertEqual(self.child_page.title, "I've been edited!")
+        comment = self.child_page.wagtail_admin_comments.get()
+        self.assert_saved_comment_pair(
+            comment=comment,
+            reply=comment.replies.get(),
+            target=target,
+            comment_occurrences=[comment_occurrence],
+            reply_occurrences=[reply_occurrence],
+            actions={"wagtail.comments.create", "wagtail.comments.create_reply"},
+            recipients={self.subscriber.email, target.email},
+            after_log_pk=first_log_pk,
+        )
+
+    def test_publish_hook_response_commits_mentions_without_audit_or_mail(self):
+        target = self.add_page_editor(
+            "edit-hook-target", email="edit-hook-target@example.com"
+        )
+        comment_text, comment_occurrence = self.mention(
+            target,
+            prefix="Hook comment for ",
+            key="7616f682-1648-4c2c-a3fd-b4de2f60624f",
+        )
+        reply_text, reply_occurrence = self.mention(
+            target,
+            prefix="Hook reply for ",
+            key="ab8bf45b-7896-4967-b8f0-9624c45091d5",
+        )
+        original_revision_id = self.child_page.latest_revision_id
+        original_comment_logs = PageLogEntry.objects.filter(
+            page=self.child_page,
+            action__startswith="wagtail.comments.",
+        ).count()
+
+        def hook_func(request, page):
+            self.assertIsInstance(request, HttpRequest)
+            self.assertEqual(page.pk, self.child_page.pk)
+            return HttpResponse("Hook response")
+
+        with (
+            self.register_hook("before_publish_page", hook_func),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+                self.comment_post_data(
+                    comment_text=comment_text,
+                    comment_mentions=[comment_occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                    action="action-publish",
+                ),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"Hook response")
+        self.child_page.refresh_from_db()
+        self.assertEqual(self.child_page.status_string, _("live + draft"))
+        self.assertNotEqual(self.child_page.latest_revision_id, original_revision_id)
+        self.assertEqual(self.child_page.title, "Hello world!")
+        self.assertEqual(
+            self.child_page.get_latest_revision().as_object().title,
+            "I've been edited!",
+        )
+        comment = self.child_page.wagtail_admin_comments.get()
+        reply = comment.replies.get()
+        self.assertEqual(comment.mentions, [comment_occurrence])
+        self.assertEqual(reply.mentions, [reply_occurrence])
+        self.assertEqual(
+            set(
+                CommentMention.objects.filter(comment=comment).values_list(
+                    "user_id", flat=True
+                )
+            ),
+            {target.pk},
+        )
+        self.assertEqual(
+            set(
+                CommentReplyMention.objects.filter(reply=reply).values_list(
+                    "user_id", flat=True
+                )
+            ),
+            {target.pk},
+        )
+        self.assertEqual(
+            PageLogEntry.objects.filter(
+                page=self.child_page,
+                action__startswith="wagtail.comments.",
+            ).count(),
+            original_comment_logs,
+        )
+        self.assertFalse(
+            PageSubscription.objects.get(
+                page=self.child_page, user=self.user
+            ).comment_notifications
+        )
+        self.assertEqual(callbacks, [])
+        self.assertEqual(mail.outbox, [])
+
+    def test_retained_comment_and_reply_mentions_survive_target_changes(self):
+        cases = ("rename", "deactivate", "permission_loss", "delete")
+        for index, target_change in enumerate(cases):
+            with self.subTest(target_change=target_change):
+                target = self.add_page_editor(
+                    f"retained-{target_change}",
+                    email=f"retained-{target_change}@example.com",
+                )
+                comment_text, comment_occurrence = self.mention(
+                    target,
+                    prefix="Retained comment for ",
+                    key=f"c9474c77-0ed7-4e41-9c7f-f597a695260{index}",
+                )
+                reply_text, reply_occurrence = self.mention(
+                    target,
+                    prefix="Retained reply for ",
+                    key=f"53e3ed2c-f922-4aad-ab41-e74867e31b7{index}",
+                )
+                comment = Comment.objects.create(
+                    page=self.child_page,
+                    user=self.subscriber,
+                    text=comment_text,
+                    mentions=[comment_occurrence],
+                    contentpath="title",
+                )
+                reply = CommentReply.objects.create(
+                    comment=comment,
+                    user=self.subscriber,
+                    text=reply_text,
+                    mentions=[reply_occurrence],
+                )
+                CommentMention.objects.create(comment=comment, user=target)
+                CommentReplyMention.objects.create(reply=reply, user=target)
+                target_pk = target.pk
+
+                if target_change == "rename":
+                    target.email = "renamed-target@example.com"
+                    target.save(update_fields=["email"])
+                elif target_change == "deactivate":
+                    target.is_active = False
+                    target.save(update_fields=["is_active"])
+                elif target_change == "permission_loss":
+                    target.groups.clear()
+                else:
+                    target.delete()
+
+                comment_log_count = PageLogEntry.objects.filter(
+                    page=self.child_page,
+                    action__startswith="wagtail.comments.",
+                ).count()
+                mail.outbox = []
+                with self.captureOnCommitCallbacks(execute=True):
+                    response = self.client.post(
+                        reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+                        self.existing_comment_post_data(
+                            comment=comment,
+                            reply=reply,
+                        ),
+                        headers={"Accept": "application/json"},
+                    )
+                    self.assertEqual(mail.outbox, [])
+
+                self.assertEqual(response.status_code, 200)
+                comment.refresh_from_db()
+                reply.refresh_from_db()
+                self.assertEqual(comment.mentions, [comment_occurrence])
+                self.assertEqual(reply.mentions, [reply_occurrence])
+                expected_targets = set() if target_change == "delete" else {target_pk}
+                self.assertEqual(
+                    set(
+                        CommentMention.objects.filter(comment=comment).values_list(
+                            "user_id", flat=True
+                        )
+                    ),
+                    expected_targets,
+                )
+                self.assertEqual(
+                    set(
+                        CommentReplyMention.objects.filter(reply=reply).values_list(
+                            "user_id", flat=True
+                        )
+                    ),
+                    expected_targets,
+                )
+                self.assertEqual(
+                    PageLogEntry.objects.filter(
+                        page=self.child_page,
+                        action__startswith="wagtail.comments.",
+                    ).count(),
+                    comment_log_count,
+                )
+                comment_json = response.json()["comments"]["comments"][0]
+                self.assertEqual(comment_json["mentions"], [comment_occurrence])
+                self.assertEqual(
+                    comment_json["replies"][0]["mentions"], [reply_occurrence]
+                )
+                if target_change == "delete":
+                    self.assertNotIn(
+                        str(target_pk), response.json()["comments"]["mentioned_users"]
+                    )
+                self.assertEqual(mail.outbox, [])
+
+                comment.delete()
+
+    def test_edit_and_remove_comment_and_reply_mentions_syncs_lookups(self):
+        old_target = self.add_page_editor(
+            "old-edit-target", email="old-edit-target@example.com"
+        )
+        new_target = self.add_page_editor(
+            "new-edit-target", email="new-edit-target@example.com"
+        )
+        old_comment_text, old_comment_occurrence = self.mention(
+            old_target,
+            prefix="Old comment for ",
+            key="b4f8b533-f11c-4522-ba35-f16533f61a7e",
+        )
+        old_reply_text, old_reply_occurrence = self.mention(
+            old_target,
+            prefix="Old reply for ",
+            key="f66153cc-abf2-4157-a806-309c690f3bb4",
+        )
+        comment = Comment.objects.create(
+            page=self.child_page,
+            user=self.user,
+            text=old_comment_text,
+            mentions=[old_comment_occurrence],
+            contentpath="title",
+        )
+        reply = CommentReply.objects.create(
+            comment=comment,
+            user=self.user,
+            text=old_reply_text,
+            mentions=[old_reply_occurrence],
+        )
+        CommentMention.objects.create(comment=comment, user=old_target)
+        CommentReplyMention.objects.create(reply=reply, user=old_target)
+
+        new_comment_text, new_comment_occurrence = self.mention(
+            new_target,
+            prefix="New comment for ",
+            key="804aaf4c-009c-4f20-a5c9-4ce7ebc8a724",
+        )
+        new_reply_text, new_reply_occurrence = self.mention(
+            new_target,
+            prefix="New reply for ",
+            key="d1f058b2-e439-462a-87eb-c4ecea193b62",
+        )
+        comment.text = new_comment_text
+        comment.mentions = [new_comment_occurrence]
+        reply.text = new_reply_text
+        reply.mentions = [new_reply_occurrence]
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+                self.existing_comment_post_data(comment=comment, reply=reply),
+            )
+
+        self.assertRedirects(
+            response,
+            reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+        )
+        comment.refresh_from_db()
+        reply.refresh_from_db()
+        self.assertEqual(comment.mentions, [new_comment_occurrence])
+        self.assertEqual(reply.mentions, [new_reply_occurrence])
+        self.assertEqual(
+            set(
+                CommentMention.objects.filter(comment=comment).values_list(
+                    "user_id", flat=True
+                )
+            ),
+            {new_target.pk},
+        )
+        self.assertEqual(
+            set(
+                CommentReplyMention.objects.filter(reply=reply).values_list(
+                    "user_id", flat=True
+                )
+            ),
+            {new_target.pk},
+        )
+        self.assertEqual(
+            {recipient for email in mail.outbox for recipient in email.to},
+            {new_target.email},
+        )
+        for action, old_occurrence, new_occurrence in (
+            (
+                "wagtail.comments.edit",
+                old_comment_occurrence,
+                new_comment_occurrence,
+            ),
+            (
+                "wagtail.comments.edit_reply",
+                old_reply_occurrence,
+                new_reply_occurrence,
+            ),
+        ):
+            entry = PageLogEntry.objects.filter(action=action).latest("pk")
+            self.assertEqual(
+                entry.data["mentions"],
+                {
+                    "added": [
+                        {
+                            "key": new_occurrence["key"],
+                            "user_id": str(new_target.pk),
+                        }
+                    ],
+                    "removed": [
+                        {
+                            "key": old_occurrence["key"],
+                            "user_id": str(old_target.pk),
+                        }
+                    ],
+                },
+            )
+
+        comment.text = "Mention removed from comment"
+        comment.mentions = []
+        reply.text = "Mention removed from reply"
+        reply.mentions = []
+        mail.outbox = []
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+                self.existing_comment_post_data(comment=comment, reply=reply),
+            )
+
+        self.assertRedirects(
+            response,
+            reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+        )
+        comment.refresh_from_db()
+        reply.refresh_from_db()
+        self.assertEqual(comment.mentions, [])
+        self.assertEqual(reply.mentions, [])
+        self.assertFalse(CommentMention.objects.filter(comment=comment).exists())
+        self.assertFalse(CommentReplyMention.objects.filter(reply=reply).exists())
+        self.assertEqual(mail.outbox, [])
+        for action, removed_occurrence in (
+            ("wagtail.comments.edit", new_comment_occurrence),
+            ("wagtail.comments.edit_reply", new_reply_occurrence),
+        ):
+            entry = PageLogEntry.objects.filter(action=action).latest("pk")
+            self.assertEqual(
+                entry.data["mentions"],
+                {
+                    "added": [],
+                    "removed": [
+                        {
+                            "key": removed_occurrence["key"],
+                            "user_id": str(new_target.pk),
+                        }
+                    ],
+                },
+            )
+
+    def test_save_rolls_back_comment_lifecycle_when_scheduling_fails(self):
+        data = self.rollback_edit_data(
+            name="save-rollback",
+            keys=(
+                "62171aa7-ad5e-4f68-9b58-af59df3c4f38",
+                "08278279-d355-4d6b-83ea-e583cd4c71fe",
+                "cd66de1d-386c-459e-9222-08d3c0a2fcaa",
+                "2aab5183-941d-41a5-833e-730a32925ab7",
+            ),
+        )
+        snapshot = self.lifecycle_snapshot()
+        registrations = []
+        mail.outbox = []
+
+        with (
+            mock.patch(
+                "wagtail.admin.views.pages.edit.schedule_comment_notifications",
+                side_effect=self.scheduler_then_raise(registrations),
+            ),
+            self.assertRaisesMessage(RuntimeError, "scheduler failed"),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+                data,
+            )
+
+        self.assertEqual(self.lifecycle_snapshot(), snapshot)
+        self.assertEqual(len(registrations), 1)
+        self.assertEqual(callbacks, [])
+        self.assertEqual(mail.outbox, [])
+
+    def test_publish_rolls_back_comment_lifecycle_when_scheduling_fails(self):
+        data = self.rollback_edit_data(
+            name="publish-rollback",
+            keys=(
+                "1c70d14b-03cb-4342-b3ec-97b336d16914",
+                "ec0d3027-e245-455e-8476-7dabd88dc323",
+                "855c462c-6273-4f11-abd5-fee84af3236c",
+                "9bc70db8-ae91-4b23-b004-01154f0a96ea",
+            ),
+            action="action-publish",
+        )
+        snapshot = self.lifecycle_snapshot()
+        registrations = []
+        mail.outbox = []
+
+        with (
+            mock.patch(
+                "wagtail.admin.views.pages.edit.schedule_comment_notifications",
+                side_effect=self.scheduler_then_raise(registrations),
+            ),
+            self.assertRaisesMessage(RuntimeError, "scheduler failed"),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+                data,
+            )
+
+        self.assertEqual(self.lifecycle_snapshot(), snapshot)
+        self.assertEqual(len(registrations), 1)
+        self.assertEqual(callbacks, [])
+        self.assertEqual(mail.outbox, [])
+
     def test_comments_enabled_by_default(self):
         response = self.client.get(
             reverse("wagtailadmin_pages:edit", args=[self.child_page.id])
@@ -4542,9 +5477,11 @@ class TestCommenting(WagtailTestUtils, TestCase):
             "comments-0-replies-MAX_NUM_FORMS": "0",
         }
 
-        response = self.client.post(
-            reverse("wagtailadmin_pages:edit", args=[self.child_page.id]), post_data
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.id]),
+                post_data,
+            )
 
         self.assertRedirects(
             response, reverse("wagtailadmin_pages:edit", args=[self.child_page.id])
@@ -4576,6 +5513,71 @@ class TestCommenting(WagtailTestUtils, TestCase):
         self.assertEqual(log_entry.data["comment"]["contentpath"], comment.contentpath)
         self.assertEqual(log_entry.data["comment"]["text"], comment.text)
 
+    def test_new_comment_with_mentions_records_audit_delta(self):
+        mentioned_user = self.add_page_editor(
+            "mentioned-user", email="mentioned-user@example.com"
+        )
+        label = f"@{mentioned_user.email}"
+        text = f"A test comment {label}"
+        occurrence = {
+            "key": "29cc6a1f-00ed-41d7-94b1-d46a947962cb",
+            "user_id": str(mentioned_user.pk),
+            "start": len("A test comment "),
+            "end": len(text),
+            "label": label,
+        }
+
+        post_data = {
+            "title": "I've been edited!",
+            "content": "Some content",
+            "slug": "hello-world",
+            "comments-TOTAL_FORMS": "1",
+            "comments-INITIAL_FORMS": "0",
+            "comments-MIN_NUM_FORMS": "0",
+            "comments-MAX_NUM_FORMS": "",
+            "comments-0-DELETE": "",
+            "comments-0-resolved": "",
+            "comments-0-id": "",
+            "comments-0-contentpath": "title",
+            "comments-0-text": text,
+            "comments-0-mentions": json.dumps([occurrence]),
+            "comments-0-position": "",
+            "comments-0-replies-TOTAL_FORMS": "0",
+            "comments-0-replies-INITIAL_FORMS": "0",
+            "comments-0-replies-MIN_NUM_FORMS": "0",
+            "comments-0-replies-MAX_NUM_FORMS": "0",
+        }
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.id]),
+                post_data,
+            )
+
+        self.assertRedirects(
+            response, reverse("wagtailadmin_pages:edit", args=[self.child_page.id])
+        )
+
+        comment = self.child_page.wagtail_admin_comments.get()
+        self.assertEqual(comment.mentions, [occurrence])
+
+        self.assertEqual(
+            {recipient for email in mail.outbox for recipient in email.to},
+            {self.subscriber.email, mentioned_user.email},
+        )
+        self.assertNeverEmailedWrongUser()
+
+        log_entry = PageLogEntry.objects.get(action="wagtail.comments.create")
+        self.assertEqual(
+            log_entry.data["mentions"],
+            {
+                "added": [
+                    {"key": occurrence["key"], "user_id": str(mentioned_user.pk)}
+                ],
+                "removed": [],
+            },
+        )
+
     def test_new_comment_json(self):
         post_data = {
             "title": "I've been edited!",
@@ -4597,11 +5599,12 @@ class TestCommenting(WagtailTestUtils, TestCase):
             "comments-0-replies-MAX_NUM_FORMS": "0",
         }
 
-        response = self.client.post(
-            reverse("wagtailadmin_pages:edit", args=[self.child_page.id]),
-            post_data,
-            headers={"Accept": "application/json"},
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.id]),
+                post_data,
+                headers={"Accept": "application/json"},
+            )
 
         self.assertEqual(response.status_code, 200)
 
@@ -4701,6 +5704,248 @@ class TestCommenting(WagtailTestUtils, TestCase):
         self.assertEqual(log_entry.data["comment"]["contentpath"], comment.contentpath)
         self.assertEqual(log_entry.data["comment"]["text"], comment.text)
 
+    def test_mention_only_comment_edit_is_audited_and_notifies_new_target(self):
+        previously_mentioned_user = self.add_page_editor(
+            "previous-mention", email="previous-mention@example.com"
+        )
+        newly_mentioned_user = self.add_page_editor(
+            "new-mention", email="new-mention@example.com"
+        )
+        previous_label = f"@{previously_mentioned_user.email}"
+        new_label = f"@{newly_mentioned_user.email}"
+        text = f"{previous_label} and {new_label}"
+        previous_occurrence = {
+            "key": "f4cf21fd-7dad-40e0-83da-d90310d2425f",
+            "user_id": str(previously_mentioned_user.pk),
+            "start": 0,
+            "end": len(previous_label),
+            "label": previous_label,
+        }
+        new_occurrence = {
+            "key": "29cc6a1f-00ed-41d7-94b1-d46a947962cb",
+            "user_id": str(newly_mentioned_user.pk),
+            "start": len(previous_label) + len(" and "),
+            "end": len(text),
+            "label": new_label,
+        }
+        comment = Comment.objects.create(
+            page=self.child_page,
+            user=self.user,
+            text=text,
+            mentions=[previous_occurrence],
+            contentpath="title",
+        )
+
+        post_data = {
+            "title": "I've been edited!",
+            "content": "Some content",
+            "slug": "hello-world",
+            "comments-TOTAL_FORMS": "1",
+            "comments-INITIAL_FORMS": "1",
+            "comments-MIN_NUM_FORMS": "0",
+            "comments-MAX_NUM_FORMS": "",
+            "comments-0-DELETE": "",
+            "comments-0-resolved": "",
+            "comments-0-id": str(comment.id),
+            "comments-0-contentpath": "title",
+            "comments-0-text": text,
+            "comments-0-mentions": json.dumps([previous_occurrence, new_occurrence]),
+            "comments-0-position": "",
+            "comments-0-replies-TOTAL_FORMS": "0",
+            "comments-0-replies-INITIAL_FORMS": "0",
+            "comments-0-replies-MIN_NUM_FORMS": "0",
+            "comments-0-replies-MAX_NUM_FORMS": "0",
+        }
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.id]),
+                post_data,
+            )
+
+        self.assertRedirects(
+            response, reverse("wagtailadmin_pages:edit", args=[self.child_page.id])
+        )
+
+        self.assertEqual(
+            [email.to for email in mail.outbox], [[newly_mentioned_user.email]]
+        )
+        self.assertNeverEmailedWrongUser()
+
+        comment.refresh_from_db()
+        self.assertEqual(comment.mentions, [previous_occurrence, new_occurrence])
+        log_entry = PageLogEntry.objects.get(action="wagtail.comments.edit")
+        self.assertEqual(
+            log_entry.data["mentions"],
+            {
+                "added": [
+                    {
+                        "key": new_occurrence["key"],
+                        "user_id": str(newly_mentioned_user.pk),
+                    }
+                ],
+                "removed": [],
+            },
+        )
+
+    def test_new_comment_with_inaccessible_mention_is_rejected(self):
+        label = f"@{self.never_emailed_user.email}"
+        text = f"A test comment {label}"
+        occurrence = {
+            "key": "29cc6a1f-00ed-41d7-94b1-d46a947962cb",
+            "user_id": str(self.never_emailed_user.pk),
+            "start": len("A test comment "),
+            "end": len(text),
+            "label": label,
+        }
+        post_data = {
+            "title": "I've been edited!",
+            "content": "Some content",
+            "slug": "hello-world",
+            "comments-TOTAL_FORMS": "1",
+            "comments-INITIAL_FORMS": "0",
+            "comments-MIN_NUM_FORMS": "0",
+            "comments-MAX_NUM_FORMS": "",
+            "comments-0-DELETE": "",
+            "comments-0-resolved": "",
+            "comments-0-id": "",
+            "comments-0-contentpath": "title",
+            "comments-0-text": text,
+            "comments-0-mentions": json.dumps([occurrence]),
+            "comments-0-position": "",
+            "comments-0-replies-TOTAL_FORMS": "0",
+            "comments-0-replies-INITIAL_FORMS": "0",
+            "comments-0-replies-MIN_NUM_FORMS": "0",
+            "comments-0-replies-MAX_NUM_FORMS": "0",
+        }
+
+        response = self.client.post(
+            reverse("wagtailadmin_pages:edit", args=[self.child_page.id]), post_data
+        )
+
+        self.assertEqual(
+            response.context["form"].formsets["comments"].errors,
+            [{"mentions": ["Enter a valid mention list."]}],
+        )
+        self.assertFalse(self.child_page.wagtail_admin_comments.exists())
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_json_rejection_serializes_unsaved_comment_and_reply_state(self):
+        mentioned_user = self.add_page_editor(
+            "json-rejected-target", email="json-rejected-target@example.com"
+        )
+        comment_text, comment_occurrence = self.mention(
+            mentioned_user,
+            prefix="Rejected comment for ",
+            key="cf40a7ed-79f5-457a-8697-01fbb031223a",
+        )
+        reply_text, reply_occurrence = self.mention(
+            mentioned_user,
+            prefix="Rejected reply for ",
+            key="25b4709f-9220-4a5e-a8ac-af4c811efdd8",
+        )
+
+        with mock.patch(
+            "wagtail.admin.forms.comments.page_mention_candidates",
+            return_value=type(mentioned_user).objects.none(),
+        ):
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+                self.comment_post_data(
+                    comment_text=comment_text,
+                    comment_mentions=[comment_occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                ),
+                headers={"Accept": "application/json"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        response_data = response.json()
+        self.assertEqual(response_data["success"], False)
+        self.assertEqual(response_data["error_code"], "validation_error")
+        self.assertEqual(
+            response_data["error_message"],
+            "There are validation errors, click save to highlight them.",
+        )
+        self.assertEqual(
+            set(response_data),
+            {"success", "error_code", "error_message", "comments"},
+        )
+        comment_data = response_data["comments"]["comments"][0]
+        reply_data = comment_data["replies"][0]
+        self.assertEqual(response_data["comments"]["mentioned_users"], {})
+        self.assertIsNone(comment_data["pk"])
+        self.assertEqual(comment_data["text"], comment_text)
+        self.assertEqual(comment_data["mentions"], [comment_occurrence])
+        self.assertEqual(comment_data["mention_error"], "Enter a valid mention list.")
+        self.assertIsNone(reply_data["pk"])
+        self.assertEqual(reply_data["text"], reply_text)
+        self.assertEqual(reply_data["mentions"], [reply_occurrence])
+        self.assertEqual(reply_data["mention_error"], "Enter a valid mention list.")
+        self.assertFalse(self.child_page.wagtail_admin_comments.exists())
+
+    def test_json_structural_errors_serialize_existing_sanitized_mentions(self):
+        mentioned_user = self.add_page_editor(
+            "json-structural-target", email="json-structural-target@example.com"
+        )
+        comment_text, comment_occurrence = self.mention(
+            mentioned_user,
+            prefix="Stored comment for ",
+            key="777feade-1380-4699-a6e6-abca9bbd58aa",
+        )
+        reply_text, reply_occurrence = self.mention(
+            mentioned_user,
+            prefix="Stored reply for ",
+            key="9d9ed399-1952-4925-af9a-3ea0e4903f22",
+        )
+        comment = Comment.objects.create(
+            page=self.child_page,
+            user=self.user,
+            text=comment_text,
+            mentions=[comment_occurrence],
+            contentpath="title",
+        )
+        reply = CommentReply.objects.create(
+            comment=comment,
+            user=self.user,
+            text=reply_text,
+            mentions=[reply_occurrence],
+        )
+        post_data = self.existing_comment_post_data(comment=comment, reply=reply)
+        post_data["comments-0-mentions"] = json.dumps(
+            [{"private-comment-payload": "do not return"}]
+        )
+        post_data["comments-0-replies-0-mentions"] = json.dumps(
+            [{"private-reply-payload": "do not return"}]
+        )
+
+        response = self.client.post(
+            reverse("wagtailadmin_pages:edit", args=[self.child_page.pk]),
+            post_data,
+            headers={"Accept": "application/json"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        response_data = response.json()
+        self.assertEqual(response_data["success"], False)
+        self.assertEqual(response_data["error_code"], "validation_error")
+        self.assertEqual(
+            response_data["error_message"],
+            "There are validation errors, click save to highlight them.",
+        )
+        comment_data = response_data["comments"]["comments"][0]
+        reply_data = comment_data["replies"][0]
+        self.assertEqual(comment_data["pk"], comment.pk)
+        self.assertEqual(comment_data["mentions"], [comment_occurrence])
+        self.assertEqual(comment_data["mention_error"], "Enter a valid mention list.")
+        self.assertEqual(reply_data["pk"], reply.pk)
+        self.assertEqual(reply_data["mentions"], [reply_occurrence])
+        self.assertEqual(reply_data["mention_error"], "Enter a valid mention list.")
+        serialized_response = json.dumps(response_data)
+        self.assertNotIn("private-comment-payload", serialized_response)
+        self.assertNotIn("private-reply-payload", serialized_response)
+
     def test_edit_another_users_comment(self):
         comment = Comment.objects.create(
             page=self.child_page,
@@ -4778,9 +6023,11 @@ class TestCommenting(WagtailTestUtils, TestCase):
             "comments-0-replies-MAX_NUM_FORMS": "0",
         }
 
-        response = self.client.post(
-            reverse("wagtailadmin_pages:edit", args=[self.child_page.id]), post_data
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.id]),
+                post_data,
+            )
 
         self.assertRedirects(
             response, reverse("wagtailadmin_pages:edit", args=[self.child_page.id])
@@ -4797,22 +6044,29 @@ class TestCommenting(WagtailTestUtils, TestCase):
         # Check notification email
         self.assertEqual(len(mail.outbox), 2)
         self.assertNeverEmailedWrongUser()
+        messages_by_recipient = {email.to[0]: email for email in mail.outbox}
+        self.assertEqual(
+            set(messages_by_recipient),
+            {self.non_subscriber.email, self.subscriber.email},
+        )
         # The non subscriber created the comment, so should also get an email
-        self.assertEqual(mail.outbox[0].to, [self.non_subscriber.email])
+        non_subscriber_message = messages_by_recipient[self.non_subscriber.email]
         self.assertEqual(
-            mail.outbox[0].subject,
+            non_subscriber_message.subject,
             'test@email.com has updated comments on "I\'ve been edited! (simple page)"',
         )
         self.assertIn(
-            'Resolved comments:\n - "A test comment"\n\n', mail.outbox[0].body
+            'Resolved comments:\n - "A test comment"\n\n',
+            non_subscriber_message.body,
         )
-        self.assertEqual(mail.outbox[1].to, [self.subscriber.email])
+        subscriber_message = messages_by_recipient[self.subscriber.email]
         self.assertEqual(
-            mail.outbox[1].subject,
+            subscriber_message.subject,
             'test@email.com has updated comments on "I\'ve been edited! (simple page)"',
         )
         self.assertIn(
-            'Resolved comments:\n - "A test comment"\n\n', mail.outbox[1].body
+            'Resolved comments:\n - "A test comment"\n\n',
+            subscriber_message.body,
         )
 
         # Check audit log
@@ -4852,9 +6106,11 @@ class TestCommenting(WagtailTestUtils, TestCase):
             "comments-0-replies-MAX_NUM_FORMS": "0",
         }
 
-        response = self.client.post(
-            reverse("wagtailadmin_pages:edit", args=[self.child_page.id]), post_data
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.id]),
+                post_data,
+            )
 
         self.assertRedirects(
             response, reverse("wagtailadmin_pages:edit", args=[self.child_page.id])
@@ -4921,9 +6177,11 @@ class TestCommenting(WagtailTestUtils, TestCase):
             "comments-0-replies-1-text": "a new reply",
         }
 
-        response = self.client.post(
-            reverse("wagtailadmin_pages:edit", args=[self.child_page.id]), post_data
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("wagtailadmin_pages:edit", args=[self.child_page.id]),
+                post_data,
+            )
 
         self.assertRedirects(
             response, reverse("wagtailadmin_pages:edit", args=[self.child_page.id])
@@ -5174,6 +6432,68 @@ class TestCommenting(WagtailTestUtils, TestCase):
 
         # No emails should be submitted because subscriber is inactive
         self.assertEqual(len(mail.outbox), 0)
+
+    def test_comment_mention_suggestions(self):
+        mentioned_user = self.add_page_editor(
+            "mentionable",
+            email="mentionable@example.com",
+            first_name="Mention",
+            last_name="Able",
+        )
+        self.add_page_editor("not-matching", email="not-matching@example.com")
+        self.create_user(
+            "inaccessible-mention",
+            email="inaccessible-mention@example.com",
+            first_name="Mention",
+            last_name="Noaccess",
+        )
+
+        response = self.client.get(
+            reverse(
+                "wagtailadmin_pages:comment_mention_suggestions",
+                args=[self.child_page.id],
+            ),
+            {"q": "mention"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        expected_result = {
+            "id": str(mentioned_user.pk),
+            "label": "@mentionable@example.com",
+            "email": "mentionable@example.com",
+        }
+        username = str(mentioned_user.get_username())
+        normalized_username = re.sub(r"\s+", " ", username).strip()
+        if normalized_username and normalized_username not in {
+            expected_result["email"],
+            expected_result["label"].removeprefix("@"),
+        }:
+            expected_result["username"] = username
+        self.assertEqual(
+            response.json(),
+            {"results": [expected_result]},
+        )
+
+    def test_comment_mention_suggestions_require_page_edit_permission(self):
+        self.client.logout()
+        user = self.create_user("not-an-editor", password="password")
+        user.user_permissions.add(
+            Permission.objects.get(
+                content_type__app_label="wagtailadmin", codename="access_admin"
+            )
+        )
+        self.login(user)
+
+        response = self.client.get(
+            reverse(
+                "wagtailadmin_pages:comment_mention_suggestions",
+                args=[self.child_page.id],
+            ),
+            {"q": "mention"},
+            headers={"x-requested-with": "XMLHttpRequest"},
+        )
+
+        self.assertEqual(response.status_code, 403)
 
 
 class TestCommentOutput(WagtailTestUtils, TestCase):

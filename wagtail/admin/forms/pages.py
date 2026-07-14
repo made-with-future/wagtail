@@ -190,14 +190,13 @@ class WagtailAdminPageForm(WagtailAdminModelForm):
         **kwargs,
     ):
         self.subscription = subscription
+        self.parent_page = parent_page
 
         initial = kwargs.pop("initial", {})
         if self.subscription:
             initial["comment_notifications"] = subscription.comment_notifications
 
         super().__init__(data, files, *args, initial=initial, **kwargs)
-
-        self.parent_page = parent_page
 
         if not self.show_comments_toggle:
             del self.fields["comment_notifications"]
@@ -228,7 +227,12 @@ class WagtailAdminPageForm(WagtailAdminModelForm):
         if comments := self.formsets.get("comments"):
             data = comments.serialize(self.is_bound, user)
         else:
-            data = {"comments": [], "user": user.pk, "authors": {}}
+            data = {
+                "comments": [],
+                "user": str(user.pk),
+                "authors": {},
+                "mentioned_users": {},
+            }
         return data
 
     def clean(self):

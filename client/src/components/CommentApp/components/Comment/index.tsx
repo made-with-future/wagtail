@@ -1,4 +1,5 @@
 import type { Store } from '../../state';
+import type { MentionedUser } from '../../utils/mentions';
 import FocusTrap from 'focus-trap-react';
 import React from 'react';
 import ReactDOM from 'react-dom';
@@ -14,9 +15,10 @@ import {
 import { Author, Comment, newCommentReply } from '../../state/comments';
 import { LayoutController } from '../../utils/layout';
 import { getNextReplyId } from '../../utils/sequences';
+import CommentEditor from '../CommentEditor';
 import { CommentHeader } from '../CommentHeader';
 import CommentReplyComponent from '../CommentReply';
-import TextArea from '../TextArea';
+import CommentText from '../CommentText';
 
 async function saveComment(comment: Comment, store: Store) {
   store.dispatch(
@@ -30,6 +32,8 @@ async function saveComment(comment: Comment, store: Store) {
       updateComment(comment.localId, {
         mode: 'default',
         text: comment.newText,
+        // Commit the working mention list only when the comment text is saved.
+        mentions: comment.newMentions,
         remoteId: comment.remoteId,
         author: comment.author,
         date: comment.date,
@@ -78,16 +82,29 @@ export interface CommentProps {
   isVisible: boolean;
   layout: LayoutController;
   user: Author | null;
+  mentionedUsers?: Readonly<Record<string, MentionedUser>>;
+  mentionSuggestionsUrl?: string;
 }
 
 export default class CommentComponent extends React.Component<CommentProps> {
   renderReplies({ hideNewReply = false } = {}): React.ReactFragment | null {
-    const { comment, isFocused, store, user } = this.props;
+    const {
+      comment,
+      isFocused,
+      mentionSuggestionsUrl,
+      mentionedUsers,
+      store,
+      user,
+    } = this.props;
 
-    const onChangeNewReply = (value: string) => {
+    const onChangeNewReply = (
+      value: string,
+      mentions: Comment['newReplyMentions'],
+    ) => {
       store.dispatch(
         updateComment(comment.localId, {
           newReply: value,
+          newReplyMentions: mentions,
         }),
       );
     };
@@ -98,6 +115,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
       const replyId = getNextReplyId();
       const reply = newCommentReply(replyId, user, Date.now(), {
         text: comment.newReply,
+        mentions: comment.newReplyMentions,
         mode: 'default',
       });
       store.dispatch(addReply(comment.localId, reply));
@@ -105,6 +123,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
       store.dispatch(
         updateComment(comment.localId, {
           newReply: '',
+          newReplyMentions: [],
         }),
       );
     };
@@ -115,6 +134,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
       store.dispatch(
         updateComment(comment.localId, {
           newReply: '',
+          newReplyMentions: [],
         }),
       );
 
@@ -140,6 +160,8 @@ export default class CommentComponent extends React.Component<CommentProps> {
             comment={comment}
             reply={reply}
             isFocused={isFocused}
+            mentionedUsers={mentionedUsers || {}}
+            mentionSuggestionsUrl={mentionSuggestionsUrl}
           />,
         );
       }
@@ -152,10 +174,15 @@ export default class CommentComponent extends React.Component<CommentProps> {
     if (!newReplyHidden && (isFocused || comment.newReply)) {
       replyForm = (
         <form onSubmit={sendReply}>
-          <TextArea
+          <CommentEditor
+            id={`comment-new-reply-mention-editor-${comment.localId}`}
+            label={gettext('Add a reply')}
             className="comment__reply-input"
             placeholder={gettext('Enter your reply...')}
             value={comment.newReply}
+            mentions={comment.newReplyMentions}
+            mentionedUsers={mentionedUsers || {}}
+            mentionSuggestionsUrl={mentionSuggestionsUrl}
             onChange={onChangeNewReply}
           />
           <div className="comment__reply-actions">
@@ -194,10 +221,11 @@ export default class CommentComponent extends React.Component<CommentProps> {
   renderCreating(): React.ReactFragment {
     const { comment, store, isFocused } = this.props;
 
-    const onChangeText = (value: string) => {
+    const onChange = (value: string, mentions: Comment['newMentions']) => {
       store.dispatch(
         updateComment(comment.localId, {
           newText: value,
+          newMentions: mentions,
         }),
       );
     };
@@ -224,15 +252,19 @@ export default class CommentComponent extends React.Component<CommentProps> {
           focused={isFocused}
         />
         <form onSubmit={onSave}>
-          <TextArea
+          <CommentEditor
+            id={`comment-mention-editor-${comment.localId}`}
+            label={gettext('Add a comment')}
             focusTarget={isFocused}
             className="comment__input"
             value={comment.newText}
-            onChange={onChangeText}
+            mentions={comment.newMentions}
+            mentionedUsers={this.props.mentionedUsers || {}}
+            mentionSuggestionsUrl={this.props.mentionSuggestionsUrl}
+            onChange={onChange}
+            error={comment.mentionError}
+            describedBy={descriptionId}
             placeholder={gettext('Enter your comments...')}
-            additionalAttributes={{
-              'aria-describedby': descriptionId,
-            }}
           />
           <div className="comment__actions">
             <button
@@ -258,10 +290,11 @@ export default class CommentComponent extends React.Component<CommentProps> {
   renderEditing(): React.ReactFragment {
     const { comment, store, isFocused } = this.props;
 
-    const onChangeText = (value: string) => {
+    const onChange = (value: string, mentions: Comment['newMentions']) => {
       store.dispatch(
         updateComment(comment.localId, {
           newText: value,
+          newMentions: mentions,
         }),
       );
     };
@@ -278,7 +311,10 @@ export default class CommentComponent extends React.Component<CommentProps> {
       store.dispatch(
         updateComment(comment.localId, {
           mode: 'default',
-          newText: comment.text,
+          text: comment.originalText,
+          mentions: comment.originalMentions,
+          newText: comment.originalText,
+          newMentions: comment.originalMentions,
         }),
       );
     };
@@ -294,14 +330,18 @@ export default class CommentComponent extends React.Component<CommentProps> {
           focused={isFocused}
         />
         <form onSubmit={onSave}>
-          <TextArea
+          <CommentEditor
+            id={`comment-mention-editor-${comment.localId}`}
+            label={gettext('Edit comment')}
             focusTarget={isFocused}
             className="comment__input"
             value={comment.newText}
-            additionalAttributes={{
-              'aria-describedby': descriptionId,
-            }}
-            onChange={onChangeText}
+            mentions={comment.newMentions}
+            mentionedUsers={this.props.mentionedUsers || {}}
+            mentionSuggestionsUrl={this.props.mentionSuggestionsUrl}
+            error={comment.mentionError}
+            describedBy={descriptionId}
+            onChange={onChange}
           />
           <div className="comment__actions">
             <button
@@ -335,7 +375,11 @@ export default class CommentComponent extends React.Component<CommentProps> {
           store={store}
           focused={isFocused}
         />
-        <p className="comment__text">{comment.text}</p>
+        <CommentText
+          text={comment.text}
+          mentions={comment.mentions}
+          mentionedUsers={this.props.mentionedUsers || {}}
+        />
         <div className="comment__progress">{gettext('Saving...')}</div>
         {this.renderReplies({ hideNewReply: true })}
       </>
@@ -358,7 +402,11 @@ export default class CommentComponent extends React.Component<CommentProps> {
           store={store}
           focused={isFocused}
         />
-        <p className="comment__text">{comment.text}</p>
+        <CommentText
+          text={comment.text}
+          mentions={comment.mentions}
+          mentionedUsers={this.props.mentionedUsers || {}}
+        />
         {this.renderReplies({ hideNewReply: true })}
         <div className="comment__error">
           {gettext('Save error')}
@@ -400,7 +448,11 @@ export default class CommentComponent extends React.Component<CommentProps> {
           store={store}
           focused={isFocused}
         />
-        <p className="comment__text">{comment.text}</p>
+        <CommentText
+          text={comment.text}
+          mentions={comment.mentions}
+          mentionedUsers={this.props.mentionedUsers || {}}
+        />
         <div className="comment__confirm-delete">
           {gettext('Are you sure?')}
           <button
@@ -433,7 +485,11 @@ export default class CommentComponent extends React.Component<CommentProps> {
           store={store}
           focused={isFocused}
         />
-        <p className="comment__text">{comment.text}</p>
+        <CommentText
+          text={comment.text}
+          mentions={comment.mentions}
+          mentionedUsers={this.props.mentionedUsers || {}}
+        />
         <div className="comment__progress">{gettext('Deleting')}</div>
         {this.renderReplies({ hideNewReply: true })}
       </>
@@ -466,7 +522,11 @@ export default class CommentComponent extends React.Component<CommentProps> {
           store={store}
           focused={isFocused}
         />
-        <p className="comment__text">{comment.text}</p>
+        <CommentText
+          text={comment.text}
+          mentions={comment.mentions}
+          mentionedUsers={this.props.mentionedUsers || {}}
+        />
         {this.renderReplies({ hideNewReply: true })}
         <div className="comment__error">
           {gettext('Delete error')}
@@ -504,6 +564,8 @@ export default class CommentComponent extends React.Component<CommentProps> {
           updateComment(comment.localId, {
             mode: 'editing',
             newText: comment.text,
+            // Seed the editor with existing mentions so unchanged mentions are retained.
+            newMentions: comment.mentions,
           }),
         );
       };
@@ -527,7 +589,11 @@ export default class CommentComponent extends React.Component<CommentProps> {
           onDelete={onDelete}
           focused={isFocused}
         />
-        <p className="comment__text">{comment.text}</p>
+        <CommentText
+          text={comment.text}
+          mentions={comment.mentions}
+          mentionedUsers={this.props.mentionedUsers || {}}
+        />
         {this.renderReplies()}
       </>
     );

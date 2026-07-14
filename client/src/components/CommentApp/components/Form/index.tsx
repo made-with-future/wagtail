@@ -1,5 +1,6 @@
 import type { Comment, CommentReply } from '../../state/comments';
 import React from 'react';
+import { serializeMentionOccurrences } from '../../utils/mentions';
 
 interface PrefixedHiddenInputProps {
   prefix: string;
@@ -49,6 +50,11 @@ export function CommentReplyFormComponent({
       <PrefixedHiddenInput
         fieldName="text"
         value={reply.text}
+        prefix={fullPrefix}
+      />
+      <PrefixedHiddenInput
+        fieldName="mentions"
+        value={JSON.stringify(serializeMentionOccurrences(reply.mentions))}
         prefix={fullPrefix}
       />
     </fieldset>
@@ -142,6 +148,11 @@ export function CommentFormComponent({
       <PrefixedHiddenInput
         fieldName="text"
         value={comment.text}
+        prefix={fullPrefix}
+      />
+      <PrefixedHiddenInput
+        fieldName="mentions"
+        value={JSON.stringify(serializeMentionOccurrences(comment.mentions))}
         prefix={fullPrefix}
       />
       <PrefixedHiddenInput

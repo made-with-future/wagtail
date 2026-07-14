@@ -1,7 +1,10 @@
 import datetime
+import json
 from unittest import mock
 
 from django.contrib.auth.models import Group, Permission
+from django.core import mail
+from django.db import connection
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.test import TestCase
 from django.test.utils import override_settings
@@ -9,12 +12,27 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
+from wagtail.admin.comment_notifications import (
+    schedule_comment_notifications as real_schedule_comment_notifications,
+)
 from wagtail.models import (
+    Comment,
+    CommentMention,
+    CommentReply,
+    CommentReplyMention,
+    GroupApprovalTask,
     GroupPagePermission,
     Locale,
     Page,
+    PageLogEntry,
+    PageSubscription,
     PageViewRestriction,
     Revision,
+    TaskState,
+    Workflow,
+    WorkflowPage,
+    WorkflowState,
+    WorkflowTask,
 )
 from wagtail.signals import init_new_page, page_published
 from wagtail.test.testapp.models import (
@@ -673,6 +691,7 @@ class TestPageCreation(WagtailTestUtils, TestCase):
                 "comments": [],
                 "user": str(self.user.pk),
                 "authors": {},
+                "mentioned_users": {},
             },
         )
         self.assertEqual(response_json["url"], edit_url)
@@ -3076,6 +3095,785 @@ class TestCommenting(WagtailTestUtils, TestCase):
         # Login
         self.user = self.login()
 
+    def add_page_editor(self, username, **kwargs):
+        user = self.create_user(username, **kwargs)
+        group = Group.objects.create(name=f"{username} page editors")
+        group.permissions.add(
+            Permission.objects.get(
+                content_type__app_label="wagtailadmin", codename="access_admin"
+            )
+        )
+        group.user_set.add(user)
+        GroupPagePermission.objects.create(
+            group=group, page=self.root_page, permission_type="change"
+        )
+        return user
+
+    def mention(self, user, *, prefix, key):
+        label = f"@{user.email}"
+        text = f"{prefix}{label}"
+        return text, {
+            "key": key,
+            "user_id": str(user.pk),
+            "start": len(prefix),
+            "end": len(text),
+            "label": label,
+        }
+
+    def scheduler_then_raise(self, registrations):
+        def schedule(*, page, editor, changes):
+            before = len(connection.run_on_commit)
+            real_schedule_comment_notifications(
+                page=page,
+                editor=editor,
+                changes=changes,
+            )
+            registered = connection.run_on_commit[before:]
+            self.assertEqual(len(registered), 1)
+            registrations.extend(item[1] for item in registered)
+            raise RuntimeError("scheduler failed")
+
+        return schedule
+
+    def comment_post_data(
+        self,
+        *,
+        slug,
+        comment_text,
+        comment_mentions,
+        reply_text=None,
+        reply_mentions=(),
+        action=None,
+    ):
+        data = {
+            "title": "Mentioned page",
+            "content": "Mention lifecycle content",
+            "slug": slug,
+            "comment_notifications": "on",
+            "comments-TOTAL_FORMS": "1",
+            "comments-INITIAL_FORMS": "0",
+            "comments-MIN_NUM_FORMS": "0",
+            "comments-MAX_NUM_FORMS": "",
+            "comments-0-DELETE": "",
+            "comments-0-resolved": "",
+            "comments-0-id": "",
+            "comments-0-contentpath": "title",
+            "comments-0-text": comment_text,
+            "comments-0-mentions": json.dumps(comment_mentions),
+            "comments-0-position": "",
+            "comments-0-replies-TOTAL_FORMS": "1" if reply_text else "0",
+            "comments-0-replies-INITIAL_FORMS": "0",
+            "comments-0-replies-MIN_NUM_FORMS": "0",
+            "comments-0-replies-MAX_NUM_FORMS": "0",
+        }
+        if reply_text:
+            data.update(
+                {
+                    "comments-0-replies-0-id": "",
+                    "comments-0-replies-0-DELETE": "",
+                    "comments-0-replies-0-text": reply_text,
+                    "comments-0-replies-0-mentions": json.dumps(reply_mentions),
+                }
+            )
+        if action:
+            data[action] = "True"
+        return data
+
+    @property
+    def add_url(self):
+        return reverse(
+            "wagtailadmin_pages:add",
+            args=("tests", "simplepage", self.root_page.pk),
+        )
+
+    def setup_workflow(self):
+        workflow = Workflow.objects.create(name="Create mention workflow")
+        task = GroupApprovalTask.objects.create(name="Create mention task")
+        task.groups.set(Group.objects.filter(name="Moderators"))
+        WorkflowTask.objects.create(workflow=workflow, task=task, sort_order=1)
+        WorkflowPage.objects.create(workflow=workflow, page=self.root_page)
+        return workflow
+
+    def lifecycle_counts(self):
+        return {
+            "pages": Page.objects.count(),
+            "revisions": Revision.objects.count(),
+            "comments": Comment.objects.count(),
+            "comment_mentions": CommentMention.objects.count(),
+            "replies": CommentReply.objects.count(),
+            "reply_mentions": CommentReplyMention.objects.count(),
+            "subscriptions": PageSubscription.objects.count(),
+            "restrictions": PageViewRestriction.objects.count(),
+            "restriction_groups": PageViewRestriction.groups.through.objects.count(),
+            "workflow_states": WorkflowState.objects.count(),
+            "task_states": TaskState.objects.count(),
+            "logs": PageLogEntry.objects.count(),
+        }
+
+    def assert_saved_comment_pair(
+        self,
+        *,
+        page,
+        target,
+        comment_occurrences,
+        reply_occurrences,
+    ):
+        comment = page.wagtail_admin_comments.get()
+        reply = comment.replies.get()
+        self.assertEqual(comment.mentions, comment_occurrences)
+        self.assertEqual(reply.mentions, reply_occurrences)
+        self.assertEqual(
+            set(
+                CommentMention.objects.filter(comment=comment).values_list(
+                    "user_id", flat=True
+                )
+            ),
+            {target.pk},
+        )
+        self.assertEqual(
+            set(
+                CommentReplyMention.objects.filter(reply=reply).values_list(
+                    "user_id", flat=True
+                )
+            ),
+            {target.pk},
+        )
+        revision = page.get_latest_revision()
+        self.assertCountEqual(
+            PageLogEntry.objects.filter(
+                page=page,
+                action__in=[
+                    "wagtail.comments.create",
+                    "wagtail.comments.create_reply",
+                ],
+            ).values_list("action", "revision_id"),
+            [
+                ("wagtail.comments.create", revision.pk),
+                ("wagtail.comments.create_reply", revision.pk),
+            ],
+        )
+        self.assertTrue(
+            PageSubscription.objects.get(
+                page=page, user=self.user
+            ).comment_notifications
+        )
+        recipients = {recipient for message in mail.outbox for recipient in message.to}
+        self.assertEqual(recipients, {target.email})
+        self.assertNotIn(self.user.email, recipients)
+
+    def test_json_save_persists_comment_and_reply_mentions_after_commit(self):
+        mentioned_user = self.add_page_editor(
+            "create-mentioned", email="create-mentioned@example.com"
+        )
+        comment_text, comment_occurrence = self.mention(
+            mentioned_user,
+            prefix="Comment for ",
+            key="75b1167f-ac3c-4b1f-9ca2-07a7ea5e67bc",
+        )
+        reply_text, reply_occurrence = self.mention(
+            mentioned_user,
+            prefix="Reply for ",
+            key="9fb7b572-2f14-4a42-bfd4-a1317a9773ab",
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                self.add_url,
+                self.comment_post_data(
+                    slug="mentioned-page",
+                    comment_text=comment_text,
+                    comment_mentions=[comment_occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                ),
+                headers={"Accept": "application/json"},
+            )
+            self.assertEqual(mail.outbox, [])
+
+        self.assertEqual(response.status_code, 200)
+        page = SimplePage.objects.get(slug="mentioned-page")
+        self.assertFalse(page.live)
+        self.assert_saved_comment_pair(
+            page=page,
+            target=mentioned_user,
+            comment_occurrences=[comment_occurrence],
+            reply_occurrences=[reply_occurrence],
+        )
+
+    def test_html_save_persists_comment_and_reply_mentions_after_commit(self):
+        target = self.add_page_editor(
+            "create-html-save", email="create-html-save@example.com"
+        )
+        comment_text, comment_occurrence = self.mention(
+            target,
+            prefix="HTML save comment for ",
+            key="60a6cff4-af3c-48a5-a095-d04ee39d74be",
+        )
+        reply_text, reply_occurrence = self.mention(
+            target,
+            prefix="HTML save reply for ",
+            key="7908d300-c580-4d22-bafd-233168a9d8a6",
+        )
+
+        with self.captureOnCommitCallbacks(execute=True) as callbacks:
+            response = self.client.post(
+                self.add_url,
+                self.comment_post_data(
+                    slug="html-save-mentions",
+                    comment_text=comment_text,
+                    comment_mentions=[comment_occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                ),
+            )
+            self.assertEqual(mail.outbox, [])
+
+        page = SimplePage.objects.get(slug="html-save-mentions")
+        self.assertRedirects(
+            response,
+            reverse("wagtailadmin_pages:edit", args=[page.pk]),
+        )
+        self.assertTrue(callbacks)
+        self.assertFalse(page.live)
+        self.assert_saved_comment_pair(
+            page=page,
+            target=target,
+            comment_occurrences=[comment_occurrence],
+            reply_occurrences=[reply_occurrence],
+        )
+
+    def test_publish_persists_comment_and_reply_mentions_after_commit(self):
+        target = self.add_page_editor(
+            "create-publish", email="create-publish@example.com"
+        )
+        comment_text, comment_occurrence = self.mention(
+            target,
+            prefix="Publish comment for ",
+            key="422772c9-1e17-4271-87db-a1b46244acbb",
+        )
+        reply_text, reply_occurrence = self.mention(
+            target,
+            prefix="Publish reply for ",
+            key="7d02fea6-57df-4761-9f0a-b288a483c165",
+        )
+
+        with self.captureOnCommitCallbacks(execute=True) as callbacks:
+            response = self.client.post(
+                self.add_url,
+                self.comment_post_data(
+                    slug="publish-mentions",
+                    comment_text=comment_text,
+                    comment_mentions=[comment_occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                    action="action-publish",
+                ),
+            )
+            self.assertEqual(mail.outbox, [])
+
+        page = SimplePage.objects.get(slug="publish-mentions")
+        self.assertRedirects(
+            response,
+            reverse("wagtailadmin_explore", args=[self.root_page.pk]),
+        )
+        self.assertTrue(callbacks)
+        self.assertTrue(page.live)
+        self.assertFalse(page.has_unpublished_changes)
+        self.assert_saved_comment_pair(
+            page=page,
+            target=target,
+            comment_occurrences=[comment_occurrence],
+            reply_occurrences=[reply_occurrence],
+        )
+
+    def test_submit_persists_comment_and_reply_mentions_after_commit(self):
+        self.setup_workflow()
+        target = self.add_page_editor(
+            "create-submit", email="create-submit@example.com"
+        )
+        comment_text, comment_occurrence = self.mention(
+            target,
+            prefix="Submit comment for ",
+            key="4a483687-aac1-45f9-9b76-74365dbcf87f",
+        )
+        reply_text, reply_occurrence = self.mention(
+            target,
+            prefix="Submit reply for ",
+            key="8fd468d5-c2d2-4bbb-ac96-dd0727b67604",
+        )
+
+        with (
+            mock.patch(
+                "wagtail.admin.mail.EmailNotificationMixin.send_emails",
+                return_value=True,
+            ),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            response = self.client.post(
+                self.add_url,
+                self.comment_post_data(
+                    slug="submit-mentions",
+                    comment_text=comment_text,
+                    comment_mentions=[comment_occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                    action="action-submit",
+                ),
+            )
+            self.assertEqual(mail.outbox, [])
+
+        page = SimplePage.objects.get(slug="submit-mentions")
+        self.assertRedirects(
+            response,
+            reverse("wagtailadmin_explore", args=[self.root_page.pk]),
+        )
+        self.assertTrue(callbacks)
+        self.assertFalse(page.live)
+        self.assertEqual(
+            page.current_workflow_state.status,
+            WorkflowState.STATUS_IN_PROGRESS,
+        )
+        self.assert_saved_comment_pair(
+            page=page,
+            target=target,
+            comment_occurrences=[comment_occurrence],
+            reply_occurrences=[reply_occurrence],
+        )
+
+    def test_publish_hook_response_commits_mentions_without_audit_or_mail(self):
+        target = self.add_page_editor(
+            "create-hook-target", email="create-hook-target@example.com"
+        )
+        comment_text, comment_occurrence = self.mention(
+            target,
+            prefix="Hook comment for ",
+            key="608c4661-e726-47bc-9d6c-aa2b69df3569",
+        )
+        reply_text, reply_occurrence = self.mention(
+            target,
+            prefix="Hook reply for ",
+            key="84b28327-a327-442f-bcc8-c345368dc159",
+        )
+
+        def hook_func(request, page):
+            self.assertIsInstance(request, HttpRequest)
+            self.assertEqual(page.title, "Mentioned page")
+            return HttpResponse("Hook response")
+
+        with (
+            self.register_hook("before_publish_page", hook_func),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            response = self.client.post(
+                self.add_url,
+                self.comment_post_data(
+                    slug="hook-mentions",
+                    comment_text=comment_text,
+                    comment_mentions=[comment_occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                    action="action-publish",
+                ),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"Hook response")
+        page = SimplePage.objects.get(slug="hook-mentions")
+        self.assertEqual(page.status_string, _("live + draft"))
+        self.assertIsNotNone(page.latest_revision_id)
+        comment = page.wagtail_admin_comments.get()
+        reply = comment.replies.get()
+        self.assertEqual(comment.mentions, [comment_occurrence])
+        self.assertEqual(reply.mentions, [reply_occurrence])
+        self.assertEqual(
+            set(
+                CommentMention.objects.filter(comment=comment).values_list(
+                    "user_id", flat=True
+                )
+            ),
+            {target.pk},
+        )
+        self.assertEqual(
+            set(
+                CommentReplyMention.objects.filter(reply=reply).values_list(
+                    "user_id", flat=True
+                )
+            ),
+            {target.pk},
+        )
+        self.assertFalse(
+            PageLogEntry.objects.filter(
+                page=page, action__startswith="wagtail.comments."
+            ).exists()
+        )
+        self.assertTrue(
+            PageSubscription.objects.get(
+                page=page, user=self.user
+            ).comment_notifications
+        )
+        self.assertEqual(callbacks, [])
+        self.assertEqual(mail.outbox, [])
+
+    def test_permission_loss_on_provisional_page_restores_bound_mentions(self):
+        mentioned_user = self.add_page_editor(
+            "permission-loss", email="permission-loss@example.com"
+        )
+        comment_text, comment_occurrence = self.mention(
+            mentioned_user,
+            prefix="Comment for ",
+            key="d6beb43f-a7bc-43e6-bbbe-8f1fc56a15d3",
+        )
+        reply_text, reply_occurrence = self.mention(
+            mentioned_user,
+            prefix="Reply for ",
+            key="8cdafdc4-86ad-41c9-93cc-7db1baadf988",
+        )
+        original_numchild = self.root_page.numchild
+
+        with (
+            mock.patch(
+                "wagtail.admin.forms.comments.page_mention_candidates",
+                return_value=type(mentioned_user).objects.none(),
+            ),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            response = self.client.post(
+                self.add_url,
+                self.comment_post_data(
+                    slug="permission-loss-page",
+                    comment_text=comment_text,
+                    comment_mentions=[comment_occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                ),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        form = response.context["form"]
+        self.assertIsNone(form.instance.pk)
+        self.assertTrue(form.instance._state.adding)
+        self.assertEqual(form.instance.path, "")
+        self.assertEqual(form.instance.depth, 0)
+        comment_form = form.formsets["comments"].forms[0]
+        reply_form = comment_form.formsets["replies"].forms[0]
+        self.assertEqual(
+            comment_form.errors, {"mentions": ["Enter a valid mention list."]}
+        )
+        self.assertEqual(
+            reply_form.errors, {"mentions": ["Enter a valid mention list."]}
+        )
+        self.assertEqual(comment_form.cleaned_data["mentions"], [comment_occurrence])
+        self.assertEqual(reply_form.cleaned_data["mentions"], [reply_occurrence])
+        for message_form in (comment_form, reply_form):
+            self.assertIsNone(message_form.instance.pk)
+            self.assertTrue(message_form.instance._state.adding)
+        soup = self.get_soup(response.content)
+        comments_data = json.loads(soup.select_one("#comments-data").string)
+        self.assertEqual(comments_data["comments"][0]["mentions"], [comment_occurrence])
+        self.assertEqual(
+            comments_data["comments"][0]["replies"][0]["mentions"],
+            [reply_occurrence],
+        )
+        comment_mentions_input = self.get_soup(
+            comment_form["mentions"].as_widget()
+        ).select_one('input[name="comments-0-mentions"]')
+        reply_mentions_input = self.get_soup(
+            reply_form["mentions"].as_widget()
+        ).select_one('input[name="comments-0-replies-0-mentions"]')
+        self.assertIsNotNone(comment_mentions_input)
+        self.assertIsNotNone(reply_mentions_input)
+        self.assertEqual(
+            json.loads(comment_mentions_input["value"]),
+            [comment_occurrence],
+        )
+        self.assertEqual(
+            json.loads(reply_mentions_input["value"]),
+            [reply_occurrence],
+        )
+        self.root_page.refresh_from_db()
+        self.assertEqual(self.root_page.numchild, original_numchild)
+        self.assertFalse(
+            SimplePage.objects.filter(slug="permission-loss-page").exists()
+        )
+        self.assertFalse(CommentMention.objects.exists())
+        self.assertFalse(CommentReplyMention.objects.exists())
+        self.assertEqual(callbacks, [])
+        self.assertEqual(mail.outbox, [])
+
+    def test_permission_loss_json_serializes_rejected_comment_and_reply(self):
+        mentioned_user = self.add_page_editor(
+            "json-permission-loss", email="json-permission-loss@example.com"
+        )
+        comment_text, comment_occurrence = self.mention(
+            mentioned_user,
+            prefix="Rejected comment for ",
+            key="9ab135ec-9f21-4bd2-a871-f70fc313ca15",
+        )
+        reply_text, reply_occurrence = self.mention(
+            mentioned_user,
+            prefix="Rejected reply for ",
+            key="6e5c8ea6-9d78-410e-88e6-8c20df6d240a",
+        )
+
+        with mock.patch(
+            "wagtail.admin.forms.comments.page_mention_candidates",
+            return_value=type(mentioned_user).objects.none(),
+        ):
+            response = self.client.post(
+                self.add_url,
+                self.comment_post_data(
+                    slug="json-permission-loss-page",
+                    comment_text=comment_text,
+                    comment_mentions=[comment_occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                ),
+                headers={"Accept": "application/json"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        response_data = response.json()
+        self.assertEqual(response_data["success"], False)
+        self.assertEqual(response_data["error_code"], "validation_error")
+        self.assertEqual(
+            response_data["error_message"],
+            "There are validation errors, click save to highlight them.",
+        )
+        self.assertEqual(
+            set(response_data),
+            {"success", "error_code", "error_message", "comments"},
+        )
+        comment_data = response_data["comments"]["comments"][0]
+        reply_data = comment_data["replies"][0]
+        self.assertEqual(response_data["comments"]["mentioned_users"], {})
+        self.assertIsNone(comment_data["pk"])
+        self.assertEqual(comment_data["text"], comment_text)
+        self.assertEqual(comment_data["mentions"], [comment_occurrence])
+        self.assertEqual(comment_data["mention_error"], "Enter a valid mention list.")
+        self.assertIsNone(reply_data["pk"])
+        self.assertEqual(reply_data["text"], reply_text)
+        self.assertEqual(reply_data["mentions"], [reply_occurrence])
+        self.assertEqual(reply_data["mention_error"], "Enter a valid mention list.")
+        self.assertFalse(
+            SimplePage.objects.filter(slug="json-permission-loss-page").exists()
+        )
+
+    def test_structural_mention_errors_json_uses_sanitized_initial_values(self):
+        post_data = self.comment_post_data(
+            slug="json-structural-error-page",
+            comment_text="Rejected comment text",
+            comment_mentions=[],
+            reply_text="Rejected reply text",
+            reply_mentions=[],
+        )
+        post_data["comments-0-mentions"] = json.dumps(
+            [{"private-comment-payload": "do not return"}]
+        )
+        post_data["comments-0-replies-0-mentions"] = json.dumps(
+            [{"private-reply-payload": "do not return"}]
+        )
+
+        response = self.client.post(
+            self.add_url,
+            post_data,
+            headers={"Accept": "application/json"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        response_data = response.json()
+        self.assertEqual(response_data["success"], False)
+        self.assertEqual(response_data["error_code"], "validation_error")
+        self.assertEqual(
+            response_data["error_message"],
+            "There are validation errors, click save to highlight them.",
+        )
+        comment_data = response_data["comments"]["comments"][0]
+        reply_data = comment_data["replies"][0]
+        self.assertIsNone(comment_data["pk"])
+        self.assertEqual(comment_data["mentions"], [])
+        self.assertEqual(comment_data["mention_error"], "Enter a valid mention list.")
+        self.assertIsNone(reply_data["pk"])
+        self.assertEqual(reply_data["mentions"], [])
+        self.assertEqual(reply_data["mention_error"], "Enter a valid mention list.")
+        serialized_response = json.dumps(response_data)
+        self.assertNotIn("private-comment-payload", serialized_response)
+        self.assertNotIn("private-reply-payload", serialized_response)
+
+    def test_save_rolls_back_provisional_page_when_scheduling_fails(self):
+        mentioned_user = self.add_page_editor(
+            "create-rollback", email="create-rollback@example.com"
+        )
+        text, occurrence = self.mention(
+            mentioned_user,
+            prefix="Rollback for ",
+            key="093c57df-6c20-4351-acb1-d62f930dc563",
+        )
+        reply_text, reply_occurrence = self.mention(
+            mentioned_user,
+            prefix="Reply rollback for ",
+            key="761347cb-bf79-49f5-82f0-b5203c7d7af2",
+        )
+        original_numchild = self.root_page.numchild
+        original_counts = self.lifecycle_counts()
+        registrations = []
+
+        with (
+            mock.patch(
+                "wagtail.test.testapp.models.SimplePage.get_default_privacy_setting",
+                return_value={"type": "login"},
+            ),
+            mock.patch(
+                "wagtail.admin.views.pages.create.schedule_comment_notifications",
+                side_effect=self.scheduler_then_raise(registrations),
+            ),
+            self.assertRaisesMessage(RuntimeError, "scheduler failed"),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            self.client.post(
+                self.add_url,
+                self.comment_post_data(
+                    slug="rolled-back-page",
+                    comment_text=text,
+                    comment_mentions=[occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                ),
+            )
+
+        self.root_page.refresh_from_db()
+        self.assertEqual(self.root_page.numchild, original_numchild)
+        self.assertFalse(SimplePage.objects.filter(slug="rolled-back-page").exists())
+        self.assertFalse(CommentMention.objects.exists())
+        self.assertFalse(CommentReplyMention.objects.exists())
+        self.assertFalse(
+            PageLogEntry.objects.filter(action__startswith="wagtail.comments.").exists()
+        )
+        self.assertFalse(
+            PageSubscription.objects.filter(page__slug="rolled-back-page").exists()
+        )
+        self.assertEqual(self.lifecycle_counts(), original_counts)
+        self.assertEqual(len(registrations), 1)
+        self.assertEqual(callbacks, [])
+        self.assertEqual(mail.outbox, [])
+
+    def test_publish_rolls_back_password_privacy_when_scheduling_fails(self):
+        mentioned_user = self.add_page_editor(
+            "create-publish-rollback",
+            email="create-publish-rollback@example.com",
+        )
+        text, occurrence = self.mention(
+            mentioned_user,
+            prefix="Publish rollback for ",
+            key="e3ff67ef-ff58-49a2-a0cf-c05328512e87",
+        )
+        reply_text, reply_occurrence = self.mention(
+            mentioned_user,
+            prefix="Publish reply rollback for ",
+            key="4384a8ef-b4f5-4335-86e2-b901bce83275",
+        )
+        original_numchild = self.root_page.numchild
+        original_counts = self.lifecycle_counts()
+        registrations = []
+
+        with (
+            mock.patch(
+                "wagtail.test.testapp.models.SimplePage.get_default_privacy_setting",
+                return_value={"type": "password", "password": "secret"},
+            ),
+            mock.patch(
+                "wagtail.admin.views.pages.create.schedule_comment_notifications",
+                side_effect=self.scheduler_then_raise(registrations),
+            ),
+            self.assertRaisesMessage(RuntimeError, "scheduler failed"),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            self.client.post(
+                self.add_url,
+                self.comment_post_data(
+                    slug="rolled-back-publish-page",
+                    comment_text=text,
+                    comment_mentions=[occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                    action="action-publish",
+                ),
+            )
+
+        self.root_page.refresh_from_db()
+        self.assertEqual(self.root_page.numchild, original_numchild)
+        self.assertFalse(
+            SimplePage.objects.filter(slug="rolled-back-publish-page").exists()
+        )
+        self.assertEqual(self.lifecycle_counts(), original_counts)
+        self.assertFalse(CommentMention.objects.exists())
+        self.assertFalse(CommentReplyMention.objects.exists())
+        self.assertEqual(len(registrations), 1)
+        self.assertEqual(callbacks, [])
+        self.assertEqual(mail.outbox, [])
+
+    def test_submit_rolls_back_group_privacy_and_workflow_when_scheduling_fails(
+        self,
+    ):
+        self.setup_workflow()
+        privacy_group = Group.objects.create(name="Mention rollback privacy")
+        mentioned_user = self.add_page_editor(
+            "create-submit-rollback",
+            email="create-submit-rollback@example.com",
+        )
+        text, occurrence = self.mention(
+            mentioned_user,
+            prefix="Submit rollback for ",
+            key="0c4d2a03-6f31-4bfd-bd90-c0f3ea9cdadc",
+        )
+        reply_text, reply_occurrence = self.mention(
+            mentioned_user,
+            prefix="Submit reply rollback for ",
+            key="53994c12-85a1-49f7-a6fd-567348163f83",
+        )
+        original_numchild = self.root_page.numchild
+        original_counts = self.lifecycle_counts()
+        registrations = []
+
+        with (
+            mock.patch(
+                "wagtail.test.testapp.models.SimplePage.get_default_privacy_setting",
+                return_value={"type": "groups", "groups": [privacy_group]},
+            ),
+            mock.patch(
+                "wagtail.admin.views.pages.create.schedule_comment_notifications",
+                side_effect=self.scheduler_then_raise(registrations),
+            ),
+            mock.patch(
+                "wagtail.admin.mail.EmailNotificationMixin.send_emails",
+                return_value=True,
+            ),
+            self.assertRaisesMessage(RuntimeError, "scheduler failed"),
+            self.captureOnCommitCallbacks(execute=True) as callbacks,
+        ):
+            self.client.post(
+                self.add_url,
+                self.comment_post_data(
+                    slug="rolled-back-submit-page",
+                    comment_text=text,
+                    comment_mentions=[occurrence],
+                    reply_text=reply_text,
+                    reply_mentions=[reply_occurrence],
+                    action="action-submit",
+                ),
+            )
+
+        self.root_page.refresh_from_db()
+        self.assertEqual(self.root_page.numchild, original_numchild)
+        self.assertFalse(
+            SimplePage.objects.filter(slug="rolled-back-submit-page").exists()
+        )
+        self.assertEqual(self.lifecycle_counts(), original_counts)
+        self.assertFalse(CommentMention.objects.exists())
+        self.assertFalse(CommentReplyMention.objects.exists())
+        self.assertEqual(len(registrations), 1)
+        self.assertEqual(callbacks, [])
+        self.assertEqual(mail.outbox, [])
+
     def test_comments_enabled_by_default(self):
         response = self.client.get(
             reverse(
@@ -3091,6 +3889,14 @@ class TestCommenting(WagtailTestUtils, TestCase):
         self.assertEqual("page-edit-form", form["id"])
         self.assertIn("w-init", form["data-controller"])
         self.assertEqual("w-comments:init", form["data-w-init-event-value"])
+        comments_data = json.loads(soup.select_one("#comments-data").string)
+        self.assertEqual(
+            comments_data["mention_suggestions_url"],
+            reverse(
+                "wagtailadmin_pages:create_comment_mention_suggestions",
+                args=["tests", "simplepage", self.root_page.pk],
+            ),
+        )
 
     @override_settings(WAGTAILADMIN_COMMENTS_ENABLED=False)
     def test_comments_disabled(self):

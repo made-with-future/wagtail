@@ -34,9 +34,7 @@ from django.utils.text import capfirst, slugify
 from django.utils.translation import gettext
 from django.utils.translation import gettext_lazy as _
 from modelcluster.fields import ParentalKey
-from modelcluster.models import (
-    ClusterableModel,
-)
+from modelcluster.models import ClusterableModel
 from treebeard.mp_tree import MP_Node, MP_NodeManager
 
 from wagtail.actions.copy_for_translation import CopyPageForTranslationAction
@@ -2675,6 +2673,23 @@ class PageLogEntry(BaseLogEntry):
             return super().message
 
 
+def _mention_changes_for_log(mention_changes):
+    if mention_changes is None:
+        return None
+
+    added = [
+        {"key": str(occurrence["key"]), "user_id": str(occurrence["user_id"])}
+        for occurrence in mention_changes.added
+    ]
+    removed = [
+        {"key": str(occurrence["key"]), "user_id": str(occurrence["user_id"])}
+        for occurrence in mention_changes.removed
+    ]
+    if not added and not removed:
+        return None
+    return {"added": added, "removed": removed}
+
+
 class Comment(ClusterableModel):
     """
     A comment on a field, or a field within a streamfield block
@@ -2689,6 +2704,7 @@ class Comment(ClusterableModel):
         related_name=COMMENTS_RELATION_NAME,
     )
     text = models.TextField()
+    mentions = models.JSONField(default=list)
 
     contentpath = models.TextField()
     # This stores the field or field within a streamfield block that the comment is applied on, in the form: 'field', or 'field.block_id.field'
@@ -2738,9 +2754,13 @@ class Comment(ClusterableModel):
                     update_fields if update_fields else self._meta.get_fields()
                 )
                 update_fields = [
-                    field.name
+                    field if isinstance(field, str) else field.name
                     for field in update_fields
-                    if field.name not in {"position", "id"}
+                ]
+                update_fields = [
+                    field_name
+                    for field_name in update_fields
+                    if field_name not in {"position", "id"}
                 ]
             else:
                 # This is a new instance, we have to preserve and then restore the position via a variable
@@ -2750,19 +2770,23 @@ class Comment(ClusterableModel):
                 return result
         return super().save(update_fields=update_fields, **kwargs)
 
-    def _log(self, action, page_revision=None, user=None):
+    def _log(self, action, page_revision=None, user=None, mention_changes=None):
+        data = {
+            "comment": {
+                "id": self.pk,
+                "contentpath": self.contentpath,
+                "text": self.text,
+            }
+        }
+        mention_data = _mention_changes_for_log(mention_changes)
+        if mention_data is not None:
+            data["mentions"] = mention_data
         log(
             instance=self.page,
             action=action,
             user=user,
             revision=page_revision,
-            data={
-                "comment": {
-                    "id": self.pk,
-                    "contentpath": self.contentpath,
-                    "text": self.text,
-                }
-            },
+            data=data,
         )
 
     def log_create(self, **kwargs):
@@ -2802,6 +2826,29 @@ class Comment(ClusterableModel):
         return bool(block)
 
 
+class CommentMention(models.Model):
+    comment = models.ForeignKey(
+        Comment,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["comment", "user"],
+                name="unique_comment_mention_user",
+            )
+        ]
+        verbose_name = _("comment mention")
+        verbose_name_plural = _("comment mentions")
+
+
 class CommentReply(models.Model):
     comment = ParentalKey(Comment, on_delete=models.CASCADE, related_name="replies")
     user = models.ForeignKey(
@@ -2810,6 +2857,7 @@ class CommentReply(models.Model):
         related_name="comment_replies",
     )
     text = models.TextField()
+    mentions = models.JSONField(default=list)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -2820,23 +2868,27 @@ class CommentReply(models.Model):
     def __str__(self):
         return f"CommentReply left by '{self.user}': '{self.text}'"
 
-    def _log(self, action, page_revision=None, user=None):
+    def _log(self, action, page_revision=None, user=None, mention_changes=None):
+        data = {
+            "comment": {
+                "id": self.comment.pk,
+                "contentpath": self.comment.contentpath,
+                "text": self.comment.text,
+            },
+            "reply": {
+                "id": self.pk,
+                "text": self.text,
+            },
+        }
+        mention_data = _mention_changes_for_log(mention_changes)
+        if mention_data is not None:
+            data["mentions"] = mention_data
         log(
             instance=self.comment.page,
             action=action,
             user=user,
             revision=page_revision,
-            data={
-                "comment": {
-                    "id": self.comment.pk,
-                    "contentpath": self.comment.contentpath,
-                    "text": self.comment.text,
-                },
-                "reply": {
-                    "id": self.pk,
-                    "text": self.text,
-                },
-            },
+            data=data,
         )
 
     def log_create(self, **kwargs):
@@ -2847,6 +2899,29 @@ class CommentReply(models.Model):
 
     def log_delete(self, **kwargs):
         self._log("wagtail.comments.delete_reply", **kwargs)
+
+
+class CommentReplyMention(models.Model):
+    reply = models.ForeignKey(
+        CommentReply,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["reply", "user"],
+                name="unique_comment_reply_mention_user",
+            )
+        ]
+        verbose_name = _("comment reply mention")
+        verbose_name_plural = _("comment reply mentions")
 
 
 class PageSubscription(models.Model):
