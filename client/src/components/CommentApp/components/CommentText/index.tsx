@@ -30,17 +30,17 @@ export function MentionSpan({
   );
 }
 
-export interface MentionTextProps {
+export interface CommentTextProps {
   text: string;
   mentions: readonly MentionOccurrence[];
   mentionedUsers: Readonly<Record<string, MentionedUser>>;
 }
 
-export default function MentionText({
+export default function CommentText({
   text,
   mentions,
   mentionedUsers,
-}: MentionTextProps): React.ReactElement {
+}: CommentTextProps): React.ReactElement {
   const content = splitTextByMentions(text, mentions).map((part) =>
     part.mention ? (
       <MentionSpan key={part.mention.key} mention={part.mention}>

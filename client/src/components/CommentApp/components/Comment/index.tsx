@@ -15,10 +15,10 @@ import {
 import { Author, Comment, newCommentReply } from '../../state/comments';
 import { LayoutController } from '../../utils/layout';
 import { getNextReplyId } from '../../utils/sequences';
+import CommentEditor from '../CommentEditor';
 import { CommentHeader } from '../CommentHeader';
 import CommentReplyComponent from '../CommentReply';
-import MentionEditor from '../MentionEditor';
-import MentionText from '../MentionText';
+import CommentText from '../CommentText';
 
 async function saveComment(comment: Comment, store: Store) {
   store.dispatch(
@@ -174,7 +174,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
     if (!newReplyHidden && (isFocused || comment.newReply)) {
       replyForm = (
         <form onSubmit={sendReply}>
-          <MentionEditor
+          <CommentEditor
             id={`comment-new-reply-mention-editor-${comment.localId}`}
             label={gettext('Add a reply')}
             className="comment__reply-input"
@@ -252,7 +252,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           focused={isFocused}
         />
         <form onSubmit={onSave}>
-          <MentionEditor
+          <CommentEditor
             id={`comment-mention-editor-${comment.localId}`}
             label={gettext('Add a comment')}
             focusTarget={isFocused}
@@ -330,7 +330,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           focused={isFocused}
         />
         <form onSubmit={onSave}>
-          <MentionEditor
+          <CommentEditor
             id={`comment-mention-editor-${comment.localId}`}
             label={gettext('Edit comment')}
             focusTarget={isFocused}
@@ -375,7 +375,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           store={store}
           focused={isFocused}
         />
-        <MentionText
+        <CommentText
           text={comment.text}
           mentions={comment.mentions}
           mentionedUsers={this.props.mentionedUsers || {}}
@@ -402,7 +402,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           store={store}
           focused={isFocused}
         />
-        <MentionText
+        <CommentText
           text={comment.text}
           mentions={comment.mentions}
           mentionedUsers={this.props.mentionedUsers || {}}
@@ -448,7 +448,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           store={store}
           focused={isFocused}
         />
-        <MentionText
+        <CommentText
           text={comment.text}
           mentions={comment.mentions}
           mentionedUsers={this.props.mentionedUsers || {}}
@@ -485,7 +485,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           store={store}
           focused={isFocused}
         />
-        <MentionText
+        <CommentText
           text={comment.text}
           mentions={comment.mentions}
           mentionedUsers={this.props.mentionedUsers || {}}
@@ -522,7 +522,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           store={store}
           focused={isFocused}
         />
-        <MentionText
+        <CommentText
           text={comment.text}
           mentions={comment.mentions}
           mentionedUsers={this.props.mentionedUsers || {}}
@@ -589,7 +589,7 @@ export default class CommentComponent extends React.Component<CommentProps> {
           onDelete={onDelete}
           focused={isFocused}
         />
-        <MentionText
+        <CommentText
           text={comment.text}
           mentions={comment.mentions}
           mentionedUsers={this.props.mentionedUsers || {}}

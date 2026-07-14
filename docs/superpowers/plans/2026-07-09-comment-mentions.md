@@ -45,10 +45,10 @@
 - `wagtail/admin/tests/test_comment_notifications.py` — recipient, copy, ordering, delivery, and audit tests.
 - `client/src/components/CommentApp/utils/mentions.ts` — wire types/conversion, query recognition, live metadata types, and display segmentation.
 - `client/src/components/CommentApp/utils/mentions.test.ts` — pure wire/query/display contract tests.
-- `client/src/components/CommentApp/components/MentionEditor/draftail.ts` and `.test.ts` — plain-text/occurrence hydration, `MENTION` entity creation, absolute UTF-16 extraction, and entity normalization.
-- `client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.ts` and `.test.tsx` — debounced, abortable, stale-safe request state.
-- `client/src/components/CommentApp/components/MentionEditor/index.tsx` and `index.test.tsx` — toolbar-free Draftail editing, entity decoration, autocomplete, and accessible listbox integration.
-- `client/src/components/CommentApp/components/MentionText/index.tsx` and `index.test.tsx` — escaped, non-linked range rendering.
+- `client/src/components/CommentApp/components/CommentEditor/draftail.ts` and `.test.ts` — plain-text/occurrence hydration, `MENTION` entity creation, absolute UTF-16 extraction, and entity normalization.
+- `client/src/components/CommentApp/components/CommentEditor/useMentionSuggestions.ts` and `.test.tsx` — debounced, abortable, stale-safe request state.
+- `client/src/components/CommentApp/components/CommentEditor/index.tsx` and `index.test.tsx` — toolbar-free Draftail editing, entity decoration, autocomplete, and accessible listbox integration.
+- `client/src/components/CommentApp/components/CommentText/index.tsx` and `index.test.tsx` — escaped, non-linked range rendering.
 - `client/src/components/CommentApp/components/Comment/index.test.tsx` and `components/CommentReply/index.test.tsx` — comment/reply lifecycle integration.
 - `client/src/components/CommentApp/main.test.tsx` — hydration/autosave round-trip.
 - `client/tests/integration/comment-mentions.test.js` — Chromium/Axe create/edit/comment/reply browser regression.
@@ -58,8 +58,8 @@
 
 - Replace `wagtail/migrations/0098_commentmention.py` with `wagtail/migrations/0098_comment_mentions.py`.
 - Replace the prototype `CommentMention` with the lookup-only `(comment, user)` model, add `CommentReplyMention`, and delete all `notified_at` handling.
-- Delete `client/src/components/CommentApp/components/Comment/CommentText.tsx` and its current email-link test after `MentionText` replaces them.
-- Delete the prototype `client/src/components/CommentApp/components/MentionTextArea/` implementation after `MentionEditor` replaces it; remove every bespoke contenteditable/caret-walker path.
+- Delete `client/src/components/CommentApp/components/Comment/CommentText.tsx` and its current email-link test after `CommentText` replaces them.
+- Delete the prototype `client/src/components/CommentApp/components/MentionTextArea/` implementation after `CommentEditor` replaces it; remove every bespoke contenteditable/caret-walker path.
 
 **Modify:**
 
@@ -1641,7 +1641,7 @@ export interface MentionQuery {
   query: string;
 }
 
-export interface MentionTextPart {
+export interface CommentTextPart {
   text: string;
   mention?: MentionOccurrence;
 }
@@ -1663,7 +1663,7 @@ export function findMentionQuery(
 export function splitTextByMentions(
   value: string,
   mentions: readonly MentionOccurrence[],
-): MentionTextPart[];
+): CommentTextPart[];
 ```
 
 Cover snake/camel round trips, deterministic `(start, end, key)` sorting, duplicate labels/users, repeated occurrences, emoji and multiline offsets, and `MentionedUser.email` remaining separate from saved identity/label data.
@@ -1793,8 +1793,8 @@ Expected: the commit contains only the six Task 10 files and no frontend migrati
 ### Task 11: Debounced and Race-Safe Suggestion Hook
 
 **Files:**
-- Create: `client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.ts`
-- Create: `client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.test.tsx`
+- Create: `client/src/components/CommentApp/components/CommentEditor/useMentionSuggestions.ts`
+- Create: `client/src/components/CommentApp/components/CommentEditor/useMentionSuggestions.test.tsx`
 
 **Interfaces:**
 - Consumes: Task 9 `MentionQuery` and `MentionSuggestion` plus the exact server `{results}` response.
@@ -1829,7 +1829,7 @@ Query identity is the complete `(start, end, query)` tuple.
 Create the shared editor directory before adding the hook files:
 
 ```bash
-mkdir -p client/src/components/CommentApp/components/MentionEditor
+mkdir -p client/src/components/CommentApp/components/CommentEditor
 ```
 
 Cover:
@@ -1849,7 +1849,7 @@ Cover:
 - [ ] **Step 2: Run the hook suite and verify RED**
 
 ```bash
-npm run test:unit -- --runInBand client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.test.tsx
+npm run test:unit -- --runInBand client/src/components/CommentApp/components/CommentEditor/useMentionSuggestions.test.tsx
 ```
 
 Expected: FAIL because the hook does not exist.
@@ -1861,9 +1861,9 @@ Use one timer and `AbortController` per effective query, plus a monotonically in
 - [ ] **Step 4: Verify the hook, formatting, lint, and types**
 
 ```bash
-npm run test:unit -- --runInBand client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.test.tsx
-./node_modules/.bin/eslint --report-unused-disable-directives client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.ts client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.test.tsx
-./node_modules/.bin/prettier --check client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.ts client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.test.tsx
+npm run test:unit -- --runInBand client/src/components/CommentApp/components/CommentEditor/useMentionSuggestions.test.tsx
+./node_modules/.bin/eslint --report-unused-disable-directives client/src/components/CommentApp/components/CommentEditor/useMentionSuggestions.ts client/src/components/CommentApp/components/CommentEditor/useMentionSuggestions.test.tsx
+./node_modules/.bin/prettier --check client/src/components/CommentApp/components/CommentEditor/useMentionSuggestions.ts client/src/components/CommentApp/components/CommentEditor/useMentionSuggestions.test.tsx
 npm run lint:ts
 ```
 
@@ -1872,7 +1872,7 @@ Expected: all commands PASS, including both stale-success and stale-error races.
 - [ ] **Step 5: Commit the isolated hook**
 
 ```bash
-git add client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.ts client/src/components/CommentApp/components/MentionEditor/useMentionSuggestions.test.tsx
+git add client/src/components/CommentApp/components/CommentEditor/useMentionSuggestions.ts client/src/components/CommentApp/components/CommentEditor/useMentionSuggestions.test.tsx
 git commit -m "Make mention suggestions race safe"
 ```
 
@@ -1894,12 +1894,12 @@ Expected: the commit contains only the hook and its test.
 - Modify: `client/src/components/CommentApp/main.tsx`
 - Create: `client/src/components/CommentApp/main.test.tsx`
 - Modify: `client/src/components/CommentApp/main.scss`
-- Create: `client/src/components/CommentApp/components/MentionEditor/draftail.ts`
-- Create: `client/src/components/CommentApp/components/MentionEditor/draftail.test.ts`
-- Create: `client/src/components/CommentApp/components/MentionEditor/index.tsx`
-- Create: `client/src/components/CommentApp/components/MentionEditor/index.test.tsx`
-- Create: `client/src/components/CommentApp/components/MentionText/index.tsx`
-- Create: `client/src/components/CommentApp/components/MentionText/index.test.tsx`
+- Create: `client/src/components/CommentApp/components/CommentEditor/draftail.ts`
+- Create: `client/src/components/CommentApp/components/CommentEditor/draftail.test.ts`
+- Create: `client/src/components/CommentApp/components/CommentEditor/index.tsx`
+- Create: `client/src/components/CommentApp/components/CommentEditor/index.test.tsx`
+- Create: `client/src/components/CommentApp/components/CommentText/index.tsx`
+- Create: `client/src/components/CommentApp/components/CommentText/index.test.tsx`
 - Delete: `client/src/components/CommentApp/components/MentionTextArea/index.tsx`
 - Delete: `client/src/components/CommentApp/components/MentionTextArea/index.test.tsx`
 - Delete: `client/src/components/CommentApp/components/Comment/CommentText.tsx`
@@ -1968,19 +1968,19 @@ CommentApp.hydrateRejectedData(data: CommentAppData): void;
 Freeze the Draft conversion contract:
 
 ```typescript
-export interface MentionEditorValue {
+export interface CommentEditorValue {
   value: string;
   mentions: MentionOccurrence[];
 }
 
-export function createMentionEditorState(
+export function createCommentEditorState(
   value: string,
   mentions: readonly MentionOccurrence[],
 ): EditorState;
 
-export function serializeMentionEditorState(
+export function serializeCommentEditorState(
   editorState: EditorState,
-): MentionEditorValue;
+): CommentEditorValue;
 
 export function getMentionQueryFromEditorState(
   editorState: EditorState,
@@ -1997,7 +1997,7 @@ export function insertMentionSuggestion(
 Freeze the component contract:
 
 ```typescript
-export interface MentionEditorProps {
+export interface CommentEditorProps {
   id: string;
   label: string;
   value: string;
@@ -2037,7 +2037,7 @@ Hydration is all-or-nothing: validate canonical order, unique keys, non-overlap,
 
 Prove `MUTABLE` partial edits keep edited characters, then remove the complete mismatched entity association using `EditorState.set` so normalization adds no undo entry. Suggestion insertion must replace query text, apply one entity, add one unlinked trailing space, and create one non-coalescing `EditorState.push(..., 'apply-entity')` undo boundary.
 
-In `MentionEditor/index.test.tsx`, cover one Draftail contenteditable, no textarea/toolbars/format controls, local selection-only `EditorState` changes with no parent callback, parent callback only when serialized text/occurrences change, equal Redux echoes preserving selection/history, genuine external changes rehydrating, and metadata-only changes rerendering decoration without rehydration.
+In `CommentEditor/index.test.tsx`, cover one Draftail contenteditable, no textarea/toolbars/format controls, local selection-only `EditorState` changes with no parent callback, parent callback only when serialized text/occurrences change, equal Redux echoes preserving selection/history, genuine external changes rehydrating, and metadata-only changes rerendering decoration without rehydration.
 
 Unit tests assert handler and `EditorState` behavior: ready Enter prevents default and stops propagation before Draft inserts a newline; ordinary Enter is not intercepted and Draftail is configured multiline; Tab closes without interception; Ctrl/Cmd+B/I/U are prevented; pointer selection prevents blur and inserts at the saved Draft selection; and synthetic composition defers query recomputation until the next Draft `onChange`. Exercise cut/paste transformations through Draft handlers and editor state. Cover Arrow wrap, Escape, loading/ready/empty/error status, and one-step undo/redo. Task 13 owns native browser newline, paste, focus, and pointer behavior; Task 14 owns native IME/caret evidence.
 
@@ -2060,7 +2060,7 @@ Expected: FAIL because occurrence-aware state, rejection hydration, Mini Draftai
 Create the new component directories before adding files:
 
 ```bash
-mkdir -p client/src/components/CommentApp/components/MentionEditor client/src/components/CommentApp/components/MentionText
+mkdir -p client/src/components/CommentApp/components/CommentEditor client/src/components/CommentApp/components/CommentText
 ```
 
 Deserialize all server occurrences through Task 9 and deep-copy arrays/elements at every initial/current/original boundary. Canonical serialized arrays drive dirty checks. Keep `mention_error` presentation-only. Restore ordinary `Author` to ID/name/avatar only and place current email exclusively under `settings.mentionedUsers`.
@@ -2105,7 +2105,7 @@ comment-new-reply-mention-editor-${comment.localId}
 comment-reply-mention-editor-${comment.localId}-${reply.localId}
 ```
 
-Save/cancel text and occurrences together. New-reply cancel clears both; existing cancel restores both. Pass the message's own generic error and merged description IDs. Replace saved `CommentText` with `MentionText` for comments and replies, then delete both legacy/prototype components and tests listed above.
+Save/cancel text and occurrences together. New-reply cancel clears both; existing cancel restores both. Pass the message's own generic error and merged description IDs. Replace the legacy `components/Comment/CommentText.tsx` renderer with `CommentText` for comments and replies, then delete both legacy/prototype components and tests listed above.
 
 - [ ] **Step 8: Add CSS once and finish visual/accessibility states**
 
@@ -2127,7 +2127,7 @@ Expected: all commands PASS; no toolbar/textarea remains; partial edits preserve
 - [ ] **Step 10: Commit the complete atomic frontend migration**
 
 ```bash
-git add -A -- client/src/components/CommentApp/state/comments.ts client/src/components/CommentApp/state/comments.test.ts client/src/components/CommentApp/state/settings.ts client/src/components/CommentApp/selectors/index.ts client/src/components/CommentApp/selectors/selectors.test.ts client/src/components/CommentApp/__fixtures__/state.tsx client/src/components/CommentApp/components/Form/index.tsx client/src/components/CommentApp/components/Form/index.test.tsx client/src/components/CommentApp/main.tsx client/src/components/CommentApp/main.test.tsx client/src/components/CommentApp/main.scss client/src/components/CommentApp/components/MentionEditor/draftail.ts client/src/components/CommentApp/components/MentionEditor/draftail.test.ts client/src/components/CommentApp/components/MentionEditor/index.tsx client/src/components/CommentApp/components/MentionEditor/index.test.tsx client/src/components/CommentApp/components/MentionText/index.tsx client/src/components/CommentApp/components/MentionText/index.test.tsx client/src/components/CommentApp/components/MentionTextArea/index.tsx client/src/components/CommentApp/components/MentionTextArea/index.test.tsx client/src/components/CommentApp/components/Comment/CommentText.tsx client/src/components/CommentApp/components/Comment/CommentText.test.tsx client/src/components/CommentApp/components/Comment/index.tsx client/src/components/CommentApp/components/Comment/index.test.tsx client/src/components/CommentApp/components/Comment/style.scss client/src/components/CommentApp/components/CommentReply/index.tsx client/src/components/CommentApp/components/CommentReply/index.test.tsx client/src/entrypoints/admin/comments.js client/src/entrypoints/admin/comments.test.js
+git add -A -- client/src/components/CommentApp/state/comments.ts client/src/components/CommentApp/state/comments.test.ts client/src/components/CommentApp/state/settings.ts client/src/components/CommentApp/selectors/index.ts client/src/components/CommentApp/selectors/selectors.test.ts client/src/components/CommentApp/__fixtures__/state.tsx client/src/components/CommentApp/components/Form/index.tsx client/src/components/CommentApp/components/Form/index.test.tsx client/src/components/CommentApp/main.tsx client/src/components/CommentApp/main.test.tsx client/src/components/CommentApp/main.scss client/src/components/CommentApp/components/CommentEditor/draftail.ts client/src/components/CommentApp/components/CommentEditor/draftail.test.ts client/src/components/CommentApp/components/CommentEditor/index.tsx client/src/components/CommentApp/components/CommentEditor/index.test.tsx client/src/components/CommentApp/components/CommentText/index.tsx client/src/components/CommentApp/components/CommentText/index.test.tsx client/src/components/CommentApp/components/MentionTextArea/index.tsx client/src/components/CommentApp/components/MentionTextArea/index.test.tsx client/src/components/CommentApp/components/Comment/CommentText.tsx client/src/components/CommentApp/components/Comment/CommentText.test.tsx client/src/components/CommentApp/components/Comment/index.tsx client/src/components/CommentApp/components/Comment/index.test.tsx client/src/components/CommentApp/components/Comment/style.scss client/src/components/CommentApp/components/CommentReply/index.tsx client/src/components/CommentApp/components/CommentReply/index.test.tsx client/src/entrypoints/admin/comments.js client/src/entrypoints/admin/comments.test.js
 git commit -m "Add Mini Draftail comment mention editing"
 ```
 

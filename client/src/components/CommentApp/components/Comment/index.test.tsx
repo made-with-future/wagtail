@@ -12,7 +12,7 @@ import {
 } from '../../state/comments';
 import { INITIAL_STATE as INITIAL_SETTINGS_STATE } from '../../state/settings';
 import { LayoutController } from '../../utils/layout';
-import MentionEditor from '../MentionEditor';
+import CommentEditor from '../CommentEditor';
 import CommentComponent from './index';
 
 const ada = {
@@ -66,7 +66,7 @@ test('creates a comment with text and occurrences and uses the exact accessible 
   });
   const { store, wrapper, refresh } = renderComment(comment);
   const editor = wrapper
-    .find(MentionEditor)
+    .find(CommentEditor)
     .filterWhere((node) => node.prop('label') === 'Add a comment');
 
   editor.invoke('onChange')('Hello @Ada', [ada]);
@@ -116,7 +116,7 @@ test('cancel restores an existing rejected comment to its saved text and occurre
   comment.mentionError = 'Enter a valid mention list.';
   const { store, wrapper, refresh } = renderComment(comment);
 
-  wrapper.find(MentionEditor).invoke('onChange')('Corrected @Ada', [
+  wrapper.find(CommentEditor).invoke('onChange')('Corrected @Ada', [
     { ...ada, key: 'corrected', start: 10, end: 14 },
   ]);
   refresh();
@@ -124,7 +124,7 @@ test('cancel restores an existing rejected comment to its saved text and occurre
     store.getState().comments.comments.get(1)?.mentionError,
   ).toBeUndefined();
 
-  expect(wrapper.find(MentionEditor).prop('label')).toBe('Edit comment');
+  expect(wrapper.find(CommentEditor).prop('label')).toBe('Edit comment');
   wrapper
     .find('button')
     .filterWhere((node) => node.text() === 'Cancel')
@@ -179,7 +179,7 @@ test('adds and cancels new replies with text and occurrences together', () => {
   });
   const { store, wrapper, refresh } = renderComment(comment);
   let editor = wrapper
-    .find(MentionEditor)
+    .find(CommentEditor)
     .filterWhere((node) => node.prop('label') === 'Add a reply');
 
   editor.invoke('onChange')('Reply @Ada', [
@@ -198,7 +198,7 @@ test('adds and cancels new replies with text and occurrences together', () => {
 
   refresh();
   editor = wrapper
-    .find(MentionEditor)
+    .find(CommentEditor)
     .filterWhere((node) => node.prop('label') === 'Add a reply');
   editor.invoke('onChange')('Discard @Ada', [
     { ...ada, start: 8, end: 12, key: 'discard-ada' },
@@ -253,7 +253,7 @@ test('keeps comment and reply rejection errors isolated in their own editors', (
   comment.newMentions = comment.mentions.map((item) => ({ ...item }));
   comment.mentionError = 'Comment mention error';
   const { wrapper } = renderComment(comment);
-  const editors = wrapper.find(MentionEditor);
+  const editors = wrapper.find(CommentEditor);
 
   expect(
     editors

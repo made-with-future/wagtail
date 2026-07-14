@@ -31,7 +31,7 @@ export interface MentionQuery {
   query: string;
 }
 
-export interface MentionTextPart {
+export interface CommentTextPart {
   text: string;
   mention?: MentionOccurrence;
 }
@@ -168,12 +168,12 @@ const hasValidMentionRanges = (
 export function splitTextByMentions(
   value: string,
   mentions: readonly MentionOccurrence[],
-): MentionTextPart[] {
+): CommentTextPart[] {
   if (!hasValidMentionRanges(value, mentions)) {
     return [{ text: value }];
   }
 
-  const parts: MentionTextPart[] = [];
+  const parts: CommentTextPart[] = [];
   let cursor = 0;
 
   for (const mention of mentions) {

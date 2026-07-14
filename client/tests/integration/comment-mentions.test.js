@@ -378,13 +378,13 @@ describe('Comment mentions', () => {
 
     await page.keyboard.type('@adm');
     await suggestionHeld;
-    const createInput = commentCard.locator('.comment__mention-input');
+    const createInput = commentCard.locator('.comment__editor');
     await createInput
       .locator('.comment__mention-status--loading')
       .waitFor({ state: 'visible' });
     expect(await createEditor.getAttribute('aria-expanded')).toBeNull();
     await expect(page).toPassAxeTests({
-      include: '.comment--mode-creating .comment__mention-input',
+      include: '.comment--mode-creating .comment__editor',
     });
 
     const createSuggestion = new URL(createSuggestionUrl);
@@ -430,7 +430,7 @@ describe('Comment mentions', () => {
       await page.locator(`#${activeOptionId}`).getAttribute('aria-selected'),
     ).toBe('true');
     await expect(page).toPassAxeTests({
-      include: '.comment--mode-creating .comment__mention-input',
+      include: '.comment--mode-creating .comment__editor',
     });
 
     await page.keyboard.press('Escape');
@@ -445,7 +445,7 @@ describe('Comment mentions', () => {
     expect(await createEditor.getAttribute('aria-controls')).toBeNull();
     expect(await createEditor.getAttribute('aria-activedescendant')).toBeNull();
     await expect(page).toPassAxeTests({
-      include: '.comment--mode-creating .comment__mention-input',
+      include: '.comment--mode-creating .comment__editor',
     });
 
     const noMatchQuery = '@no-such-wagtail-user-987654321';
@@ -457,7 +457,7 @@ describe('Comment mentions', () => {
     expect(await createEditor.getAttribute('aria-expanded')).toBeNull();
     expect(await listbox.count()).toBe(0);
     await expect(page).toPassAxeTests({
-      include: '.comment--mode-creating .comment__mention-input',
+      include: '.comment--mode-creating .comment__editor',
     });
 
     await selectEditorRange(

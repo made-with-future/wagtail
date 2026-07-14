@@ -5,9 +5,9 @@ import React from 'react';
 
 import { gettext } from '../../../../utils/gettext';
 import { deleteReply, updateReply } from '../../actions/comments';
+import CommentEditor from '../CommentEditor';
 import { CommentHeader } from '../CommentHeader';
-import MentionEditor from '../MentionEditor';
-import MentionText from '../MentionText';
+import CommentText from '../CommentText';
 
 export async function saveCommentReply(
   comment: Comment,
@@ -118,7 +118,7 @@ export default class CommentReplyComponent extends React.Component<CommentReplyP
           focused={isFocused}
         />
         <form onSubmit={onSave}>
-          <MentionEditor
+          <CommentEditor
             id={`comment-reply-mention-editor-${comment.localId}-${reply.localId}`}
             label={gettext('Edit reply')}
             className="comment-reply__input"
@@ -157,7 +157,7 @@ export default class CommentReplyComponent extends React.Component<CommentReplyP
     return (
       <>
         <CommentHeader commentReply={reply} store={store} focused={isFocused} />
-        <MentionText
+        <CommentText
           text={reply.text}
           mentions={reply.mentions}
           mentionedUsers={this.props.mentionedUsers || {}}
@@ -179,7 +179,7 @@ export default class CommentReplyComponent extends React.Component<CommentReplyP
     return (
       <>
         <CommentHeader commentReply={reply} store={store} focused={isFocused} />
-        <MentionText
+        <CommentText
           text={reply.text}
           mentions={reply.mentions}
           mentionedUsers={this.props.mentionedUsers || {}}
@@ -220,7 +220,7 @@ export default class CommentReplyComponent extends React.Component<CommentReplyP
     return (
       <>
         <CommentHeader commentReply={reply} store={store} focused={isFocused} />
-        <MentionText
+        <CommentText
           text={reply.text}
           mentions={reply.mentions}
           mentionedUsers={this.props.mentionedUsers || {}}
@@ -252,7 +252,7 @@ export default class CommentReplyComponent extends React.Component<CommentReplyP
     return (
       <>
         <CommentHeader commentReply={reply} store={store} focused={isFocused} />
-        <MentionText
+        <CommentText
           text={reply.text}
           mentions={reply.mentions}
           mentionedUsers={this.props.mentionedUsers || {}}
@@ -284,7 +284,7 @@ export default class CommentReplyComponent extends React.Component<CommentReplyP
     return (
       <>
         <CommentHeader commentReply={reply} store={store} focused={isFocused} />
-        <MentionText
+        <CommentText
           text={reply.text}
           mentions={reply.mentions}
           mentionedUsers={this.props.mentionedUsers || {}}
@@ -348,7 +348,7 @@ export default class CommentReplyComponent extends React.Component<CommentReplyP
           onDelete={onDelete}
           focused={isFocused}
         />
-        <MentionText
+        <CommentText
           text={reply.text}
           mentions={reply.mentions}
           mentionedUsers={this.props.mentionedUsers || {}}

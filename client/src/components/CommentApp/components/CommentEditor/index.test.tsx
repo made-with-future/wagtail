@@ -1,13 +1,13 @@
 import type { UseMentionSuggestionsResult } from './useMentionSuggestions';
-import type { MentionEditorProps } from './index';
+import type { CommentEditorProps } from './index';
 import { ContentBlock, EditorState, Modifier, SelectionState } from 'draft-js';
 import { ReactWrapper, mount } from 'enzyme';
 import React from 'react';
 import { act } from 'react-dom/test-utils';
 
-import { serializeMentionEditorState } from './draftail';
+import { serializeCommentEditorState } from './draftail';
 import { useMentionSuggestions } from './useMentionSuggestions';
-import MentionEditor from './index';
+import CommentEditor from './index';
 
 jest.mock('./useMentionSuggestions', () => ({
   useMentionSuggestions: jest.fn(),
@@ -39,7 +39,7 @@ const suggestionState = (
   ...overrides,
 });
 
-const baseProps: MentionEditorProps = {
+const baseProps: CommentEditorProps = {
   id: 'comment-mention-editor-1',
   label: 'Add a comment',
   value: '',
@@ -86,7 +86,7 @@ const chooseFirstSuggestion = (wrapper: ReactWrapper) => {
     EditorState.forceSelection(state, select(firstBlock(state), 3)),
   );
   const capture = wrapper
-    .find('.comment__mention-input')
+    .find('.comment__editor')
     .prop('onKeyDownCapture') as React.KeyboardEventHandler;
 
   act(() =>
@@ -112,7 +112,7 @@ afterEach(() => {
 
 test('renders one accessible multiline contenteditable and explicitly disables rich-text UI', () => {
   const wrapper = mount(
-    <MentionEditor
+    <CommentEditor
       {...baseProps}
       focusTarget
       describedBy="comment-description-1 shared-description"
@@ -163,7 +163,7 @@ test('renders one accessible multiline contenteditable and explicitly disables r
 });
 
 test('keeps selection and focus transitions local without parent callbacks', () => {
-  const wrapper = mount(<MentionEditor {...baseProps} value="Hello" />);
+  const wrapper = mount(<CommentEditor {...baseProps} value="Hello" />);
   const initial = editorState(wrapper);
   const selected = EditorState.forceSelection(
     initial,
@@ -182,7 +182,7 @@ test('keeps selection and focus transitions local without parent callbacks', () 
 test('notifies only for serialized changes and preserves state for equal Redux echoes', () => {
   const onChange = jest.fn();
   const wrapper = mount(
-    <MentionEditor {...baseProps} value="Hello" onChange={onChange} />,
+    <CommentEditor {...baseProps} value="Hello" onChange={onChange} />,
   );
   const initial = editorState(wrapper);
   const block = firstBlock(initial);
@@ -208,7 +208,7 @@ test('notifies only for serialized changes and preserves state for equal Redux e
   wrapper.setProps({ value: 'External value', mentions: [] });
   wrapper.update();
   expect(editorState(wrapper)).not.toBe(localState);
-  expect(serializeMentionEditorState(editorState(wrapper)).value).toBe(
+  expect(serializeCommentEditorState(editorState(wrapper)).value).toBe(
     'External value',
   );
 });
@@ -222,7 +222,7 @@ test('metadata-only changes rerender mention decoration without rehydrating', ()
     label: '@Ada',
   };
   const wrapper = mount(
-    <MentionEditor
+    <CommentEditor
       {...baseProps}
       value="@Ada"
       mentions={[mention]}
@@ -249,7 +249,7 @@ test('shows selected suggestion email before server metadata is available', () =
   useSuggestionsMock.mockReturnValue(
     suggestionState({ status: 'ready', suggestions: [ada] }),
   );
-  const wrapper = mount(<MentionEditor {...baseProps} value="@ad" />);
+  const wrapper = mount(<CommentEditor {...baseProps} value="@ad" />);
 
   chooseFirstSuggestion(wrapper);
 
@@ -262,7 +262,7 @@ test('retains selected suggestion email through Draft undo and redo', () => {
   useSuggestionsMock.mockReturnValue(
     suggestionState({ status: 'ready', suggestions: [ada] }),
   );
-  const wrapper = mount(<MentionEditor {...baseProps} value="@ad" />);
+  const wrapper = mount(<CommentEditor {...baseProps} value="@ad" />);
   chooseFirstSuggestion(wrapper);
 
   changeEditor(wrapper, EditorState.undo(editorState(wrapper)));
@@ -280,7 +280,7 @@ test('server metadata retires the selected email without changing editor state',
   );
   const onChange = jest.fn();
   const wrapper = mount(
-    <MentionEditor {...baseProps} value="@ad" onChange={onChange} />,
+    <CommentEditor {...baseProps} value="@ad" onChange={onChange} />,
   );
   chooseFirstSuggestion(wrapper);
   const selectedState = editorState(wrapper);
@@ -311,7 +311,7 @@ test('bridges popup ownership and active option only while a ready list exists',
   useSuggestionsMock.mockReturnValue(
     suggestionState({ status: 'ready', suggestions: [ada, bea] }),
   );
-  const wrapper = mount(<MentionEditor {...baseProps} value="@ad" />);
+  const wrapper = mount(<CommentEditor {...baseProps} value="@ad" />);
   const state = editorState(wrapper);
   changeEditor(
     wrapper,
@@ -343,7 +343,7 @@ test('ready Enter inserts before Draft, Tab only closes, and ordinary Enter stay
   );
   const onChange = jest.fn();
   const wrapper = mount(
-    <MentionEditor {...baseProps} value="@ad" onChange={onChange} />,
+    <CommentEditor {...baseProps} value="@ad" onChange={onChange} />,
   );
   const state = editorState(wrapper);
   changeEditor(
@@ -351,7 +351,7 @@ test('ready Enter inserts before Draft, Tab only closes, and ordinary Enter stay
     EditorState.forceSelection(state, select(firstBlock(state), 3)),
   );
   const capture = wrapper
-    .find('.comment__mention-input')
+    .find('.comment__editor')
     .prop('onKeyDownCapture') as React.KeyboardEventHandler;
   const enter = {
     key: 'Enter',
@@ -381,7 +381,7 @@ test('ready Enter inserts before Draft, Tab only closes, and ordinary Enter stay
   wrapper.setProps({ mentionedUsers: {} });
   wrapper.update();
   const closedCapture = wrapper
-    .find('.comment__mention-input')
+    .find('.comment__editor')
     .prop('onKeyDownCapture') as React.KeyboardEventHandler;
   const ordinaryEnter = {
     key: 'Enter',
@@ -394,9 +394,9 @@ test('ready Enter inserts before Draft, Tab only closes, and ordinary Enter stay
 });
 
 test.each(['b', 'i', 'u'])('blocks Ctrl/Cmd+%s formatting shortcuts', (key) => {
-  const wrapper = mount(<MentionEditor {...baseProps} />);
+  const wrapper = mount(<CommentEditor {...baseProps} />);
   const capture = wrapper
-    .find('.comment__mention-input')
+    .find('.comment__editor')
     .prop('onKeyDownCapture') as React.KeyboardEventHandler;
   const event = {
     key,
@@ -417,7 +417,7 @@ test('arrow navigation wraps, Escape closes, and pointer insertion uses the save
   );
   const onChange = jest.fn();
   const wrapper = mount(
-    <MentionEditor {...baseProps} value="@ad tail" onChange={onChange} />,
+    <CommentEditor {...baseProps} value="@ad tail" onChange={onChange} />,
   );
   const state = editorState(wrapper);
   changeEditor(
@@ -425,7 +425,7 @@ test('arrow navigation wraps, Escape closes, and pointer insertion uses the save
     EditorState.forceSelection(state, select(firstBlock(state), 3)),
   );
   const capture = wrapper
-    .find('.comment__mention-input')
+    .find('.comment__editor')
     .prop('onKeyDownCapture') as React.KeyboardEventHandler;
 
   act(() =>
@@ -458,8 +458,8 @@ test('arrow navigation wraps, Escape closes, and pointer insertion uses the save
 });
 
 test('composition defers query recomputation until the subsequent Draft change', () => {
-  const wrapper = mount(<MentionEditor {...baseProps} />);
-  const input = wrapper.find('.comment__mention-input');
+  const wrapper = mount(<CommentEditor {...baseProps} />);
+  const input = wrapper.find('.comment__editor');
   act(() => input.invoke('onCompositionStart')?.({} as React.CompositionEvent));
   wrapper.update();
 
@@ -503,7 +503,7 @@ test.each(['loading', 'empty', 'error'] as const)(
     const gettext = jest.fn((message: string) => `Translated: ${message}`);
     (window as any).django = { gettext };
     useSuggestionsMock.mockReturnValue(suggestionState({ status }));
-    const wrapper = mount(<MentionEditor {...baseProps} value="@ad" />);
+    const wrapper = mount(<CommentEditor {...baseProps} value="@ad" />);
 
     expect(wrapper.find(`.comment__mention-status--${status}`).text()).toBe(
       `Translated: ${messages[status]}`,
@@ -520,7 +520,7 @@ test('names localized ready results and keeps active-option ARIA aligned', () =>
   useSuggestionsMock.mockReturnValue(
     suggestionState({ status: 'ready', suggestions: [ada, bea] }),
   );
-  const wrapper = mount(<MentionEditor {...baseProps} value="@ad" />);
+  const wrapper = mount(<CommentEditor {...baseProps} value="@ad" />);
   const state = editorState(wrapper);
   changeEditor(
     wrapper,
@@ -552,7 +552,7 @@ test('clamps selection and Enter together when ready results shrink', () => {
   );
   const onChange = jest.fn();
   const wrapper = mount(
-    <MentionEditor {...baseProps} value="@ad" onChange={onChange} />,
+    <CommentEditor {...baseProps} value="@ad" onChange={onChange} />,
   );
   const state = editorState(wrapper);
   changeEditor(
@@ -560,7 +560,7 @@ test('clamps selection and Enter together when ready results shrink', () => {
     EditorState.forceSelection(state, select(firstBlock(state), 3)),
   );
   const capture = wrapper
-    .find('.comment__mention-input')
+    .find('.comment__editor')
     .prop('onKeyDownCapture') as React.KeyboardEventHandler;
   act(() =>
     capture({
@@ -589,7 +589,7 @@ test('clamps selection and Enter together when ready results shrink', () => {
   act(() =>
     (
       wrapper
-        .find('.comment__mention-input')
+        .find('.comment__editor')
         .prop('onKeyDownCapture') as React.KeyboardEventHandler
     )(enter),
   );
@@ -602,7 +602,7 @@ test('clamps selection and Enter together when ready results shrink', () => {
 test('cut and paste Draft states notify once and preserve one-step undo and redo', () => {
   const onChange = jest.fn();
   const wrapper = mount(
-    <MentionEditor {...baseProps} value="Hello" onChange={onChange} />,
+    <CommentEditor {...baseProps} value="Hello" onChange={onChange} />,
   );
   const initial = editorState(wrapper);
   const block = firstBlock(initial);

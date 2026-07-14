@@ -12,7 +12,7 @@ import {
   newCommentReply,
 } from '../../state/comments';
 import { INITIAL_STATE as INITIAL_SETTINGS_STATE } from '../../state/settings';
-import MentionEditor from '../MentionEditor';
+import CommentEditor from '../CommentEditor';
 import CommentReplyComponent from './index';
 
 const ada = {
@@ -70,7 +70,7 @@ test('edits and saves a reply with occurrences using the exact label', () => {
   });
   reply.newText = reply.text;
   const { store, wrapper, refresh } = setup(reply);
-  const editor = wrapper.find(MentionEditor);
+  const editor = wrapper.find(CommentEditor);
 
   expect(editor.prop('label')).toBe('Edit reply');
   editor.invoke('onChange')('Reply @Ada', [ada]);
@@ -101,7 +101,7 @@ test('cancel restores a saved rejected reply to original text and occurrences', 
   reply.mentionError = 'Enter a valid mention list.';
   const { store, wrapper, refresh } = setup(reply);
 
-  wrapper.find(MentionEditor).invoke('onChange')('Corrected @Ada', [
+  wrapper.find(CommentEditor).invoke('onChange')('Corrected @Ada', [
     { ...ada, key: 'corrected', start: 10, end: 14 },
   ]);
   refresh();

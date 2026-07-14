@@ -5,11 +5,11 @@ import type {
 import { ContentBlock, EditorState, Modifier, SelectionState } from 'draft-js';
 
 import {
-  createMentionEditorState,
+  createCommentEditorState,
   getMentionQueryFromEditorState,
   insertMentionSuggestion,
-  normalizeMentionEditorState,
-  serializeMentionEditorState,
+  normalizeCommentEditorState,
+  serializeCommentEditorState,
 } from './draftail';
 
 const occurrence = (
@@ -49,10 +49,10 @@ test('hydrates and serializes plain multiline UTF-16 text deterministically', ()
   const second = occurrence(value, 'second', '7', '@Ada', first.end);
   const third = occurrence(value, 'third', '8', '@Ada', second.end);
 
-  const state = createMentionEditorState(value, [first, second, third]);
+  const state = createCommentEditorState(value, [first, second, third]);
 
   expect(state.getCurrentContent().getBlockMap().size).toBe(2);
-  expect(serializeMentionEditorState(state)).toEqual({
+  expect(serializeCommentEditorState(state)).toEqual({
     value,
     mentions: [first, second, third],
   });
@@ -118,12 +118,12 @@ test.each([
 ])(
   'invalid %s rejects the complete hydration before applying entities',
   (_name, value, mentions) => {
-    const state = createMentionEditorState(
+    const state = createCommentEditorState(
       value,
       mentions as MentionOccurrence[],
     );
 
-    expect(serializeMentionEditorState(state)).toEqual({
+    expect(serializeCommentEditorState(state)).toEqual({
       value,
       mentions: [],
     });
@@ -141,7 +141,7 @@ test.each([
 );
 
 test('extracts mention queries only from a collapsed Draft selection', () => {
-  const state = createMentionEditorState('Hello @ada', []);
+  const state = createCommentEditorState('Hello @ada', []);
   const block = firstBlock(state);
   const collapsed = EditorState.forceSelection(state, selection(block, 10));
   const selected = EditorState.forceSelection(state, selection(block, 7, 10));
@@ -156,7 +156,7 @@ test('extracts mention queries only from a collapsed Draft selection', () => {
 
 test('ignores a mention query when the caret is inside its live entity', () => {
   const value = 'Hello @Ada';
-  const state = createMentionEditorState(value, [
+  const state = createCommentEditorState(value, [
     occurrence(value, 'ada', '7', '@Ada'),
   ]);
   const block = firstBlock(state);
@@ -166,7 +166,7 @@ test('ignores a mention query when the caret is inside its live entity', () => {
 });
 
 test('ignores a mention query at its half-open end after deleting its trailing space', () => {
-  const state = createMentionEditorState('@ad', []);
+  const state = createCommentEditorState('@ad', []);
   const block = firstBlock(state);
   const selected = EditorState.forceSelection(state, selection(block, 3));
   const inserted = insertMentionSuggestion(
@@ -181,7 +181,7 @@ test('ignores a mention query at its half-open end after deleting its trailing s
     selection(insertedBlock, 4, 5),
     'backward',
   );
-  const withoutSpace = normalizeMentionEditorState(
+  const withoutSpace = normalizeCommentEditorState(
     pushContent(inserted, withoutSpaceContent, 'backspace-character'),
   );
   const withoutSpaceBlock = firstBlock(withoutSpace);
@@ -190,7 +190,7 @@ test('ignores a mention query at its half-open end after deleting its trailing s
     selection(withoutSpaceBlock, 4),
   );
 
-  expect(serializeMentionEditorState(atEntityEnd)).toEqual({
+  expect(serializeCommentEditorState(atEntityEnd)).toEqual({
     value: '@Ada',
     mentions: [
       {
@@ -207,7 +207,7 @@ test('ignores a mention query at its half-open end after deleting its trailing s
 
 test('ignores a query extended past a live mention by adjacent token characters', () => {
   const value = '@Adaextra';
-  const state = createMentionEditorState(value, [
+  const state = createCommentEditorState(value, [
     occurrence(value, 'ada', '7', '@Ada'),
   ]);
   const block = firstBlock(state);
@@ -221,7 +221,7 @@ test('ignores a query extended past a live mention by adjacent token characters'
 
 test('recognizes query-shaped text after normalization removes its mismatched entity', () => {
   const value = 'Hello @Ada';
-  const state = createMentionEditorState(value, [
+  const state = createCommentEditorState(value, [
     occurrence(value, 'ada', '7', '@Ada'),
   ]);
   const block = firstBlock(state);
@@ -230,7 +230,7 @@ test('recognizes query-shaped text after normalization removes its mismatched en
     selection(block, 8, 9),
     'x',
   );
-  const normalized = normalizeMentionEditorState(
+  const normalized = normalizeCommentEditorState(
     pushContent(state, changedContent, 'insert-characters'),
   );
   const normalizedBlock = firstBlock(normalized);
@@ -247,7 +247,7 @@ test('recognizes query-shaped text after normalization removes its mismatched en
 });
 
 test('inserts one mutable entity and an unlinked trailing space in one undo step', () => {
-  const state = createMentionEditorState('Hello @ad world', []);
+  const state = createCommentEditorState('Hello @ad world', []);
   const block = firstBlock(state);
   const selected = EditorState.forceSelection(state, selection(block, 9));
   const suggestion: MentionSuggestion = {
@@ -263,7 +263,7 @@ test('inserts one mutable entity and an unlinked trailing space in one undo step
     () => 'mention-ada',
   );
 
-  expect(serializeMentionEditorState(inserted)).toEqual({
+  expect(serializeCommentEditorState(inserted)).toEqual({
     value: 'Hello @Ada  world',
     mentions: [
       {
@@ -290,19 +290,19 @@ test('inserts one mutable entity and an unlinked trailing space in one undo step
     firstBlock(inserted).getCharacterList().get(10).getEntity(),
   ).toBeNull();
   expect(inserted.getLastChangeType()).toBe('apply-entity');
-  expect(serializeMentionEditorState(EditorState.undo(inserted))).toEqual({
+  expect(serializeCommentEditorState(EditorState.undo(inserted))).toEqual({
     value: 'Hello @ad world',
     mentions: [],
   });
   expect(
-    serializeMentionEditorState(EditorState.redo(EditorState.undo(inserted))),
-  ).toEqual(serializeMentionEditorState(inserted));
+    serializeCommentEditorState(EditorState.redo(EditorState.undo(inserted))),
+  ).toEqual(serializeCommentEditorState(inserted));
 });
 
 test('plain edits before and after entities update ranges without losing identity', () => {
   const value = 'Hello @Ada';
   const ada = occurrence(value, 'ada', '7', '@Ada');
-  const hydrated = createMentionEditorState(value, [ada]);
+  const hydrated = createCommentEditorState(value, [ada]);
   const block = firstBlock(hydrated);
   const beforeContent = Modifier.insertText(
     hydrated.getCurrentContent(),
@@ -318,7 +318,7 @@ test('plain edits before and after entities update ranges without losing identit
   );
   const after = pushContent(before, afterContent, 'insert-characters');
 
-  expect(serializeMentionEditorState(after)).toEqual({
+  expect(serializeCommentEditorState(after)).toEqual({
     value: 'Well, Hello @Ada!',
     mentions: [{ ...ada, start: 12, end: 16 }],
   });
@@ -327,7 +327,7 @@ test('plain edits before and after entities update ranges without losing identit
 test('partial edits preserve characters but normalization removes the whole identity in the same undo frame', () => {
   const value = 'Hello @Ada';
   const ada = occurrence(value, 'ada', '7', '@Ada');
-  const hydrated = createMentionEditorState(value, [ada]);
+  const hydrated = createCommentEditorState(value, [ada]);
   const block = firstBlock(hydrated);
   const changedContent = Modifier.replaceText(
     hydrated.getCurrentContent(),
@@ -336,14 +336,14 @@ test('partial edits preserve characters but normalization removes the whole iden
   );
   const changed = pushContent(hydrated, changedContent, 'insert-characters');
 
-  const normalized = normalizeMentionEditorState(changed);
+  const normalized = normalizeCommentEditorState(changed);
 
-  expect(serializeMentionEditorState(normalized)).toEqual({
+  expect(serializeCommentEditorState(normalized)).toEqual({
     value: 'Hello @Axa',
     mentions: [],
   });
   expect(normalized.getUndoStack()).toBe(changed.getUndoStack());
-  expect(serializeMentionEditorState(EditorState.undo(normalized))).toEqual({
+  expect(serializeCommentEditorState(EditorState.undo(normalized))).toEqual({
     value,
     mentions: [ada],
   });
@@ -352,14 +352,14 @@ test('partial edits preserve characters but normalization removes the whole iden
 test('consecutive typing after normalization remains one undo and redo step', () => {
   const value = 'Hello @Ada';
   const ada = occurrence(value, 'ada', '7', '@Ada');
-  const hydrated = createMentionEditorState(value, [ada]);
+  const hydrated = createCommentEditorState(value, [ada]);
   const block = firstBlock(hydrated);
   const firstContent = Modifier.replaceText(
     hydrated.getCurrentContent(),
     selection(block, 8, 9),
     'x',
   );
-  const first = normalizeMentionEditorState(
+  const first = normalizeCommentEditorState(
     pushContent(hydrated, firstContent, 'insert-characters'),
   );
   const secondContent = Modifier.insertText(
@@ -367,28 +367,28 @@ test('consecutive typing after normalization remains one undo and redo step', ()
     first.getSelection(),
     'y',
   );
-  const second = normalizeMentionEditorState(
+  const second = normalizeCommentEditorState(
     pushContent(first, secondContent, 'insert-characters'),
   );
 
-  expect(serializeMentionEditorState(second)).toEqual({
+  expect(serializeCommentEditorState(second)).toEqual({
     value: 'Hello @Axya',
     mentions: [],
   });
   const undone = EditorState.undo(second);
-  expect(serializeMentionEditorState(undone)).toEqual({
+  expect(serializeCommentEditorState(undone)).toEqual({
     value,
     mentions: [ada],
   });
-  expect(serializeMentionEditorState(EditorState.redo(undone))).toEqual(
-    serializeMentionEditorState(second),
+  expect(serializeCommentEditorState(EditorState.redo(undone))).toEqual(
+    serializeCommentEditorState(second),
   );
 });
 
 test('cut, selected replacement, and plain-text paste transform text and entities', () => {
   const value = 'Start @Ada end';
   const ada = occurrence(value, 'ada', '7', '@Ada');
-  const hydrated = createMentionEditorState(value, [ada]);
+  const hydrated = createCommentEditorState(value, [ada]);
   const block = firstBlock(hydrated);
 
   const cutContent = Modifier.removeRange(
@@ -396,10 +396,10 @@ test('cut, selected replacement, and plain-text paste transform text and entitie
     selection(block, 6, 10),
     'forward',
   );
-  const cut = normalizeMentionEditorState(
+  const cut = normalizeCommentEditorState(
     pushContent(hydrated, cutContent, 'remove-range'),
   );
-  expect(serializeMentionEditorState(cut)).toEqual({
+  expect(serializeCommentEditorState(cut)).toEqual({
     value: 'Start  end',
     mentions: [],
   });
@@ -409,10 +409,10 @@ test('cut, selected replacement, and plain-text paste transform text and entitie
     selection(block, 7, 9),
     'XX',
   );
-  const replaced = normalizeMentionEditorState(
+  const replaced = normalizeCommentEditorState(
     pushContent(hydrated, replacedContent, 'insert-characters'),
   );
-  expect(serializeMentionEditorState(replaced)).toEqual({
+  expect(serializeCommentEditorState(replaced)).toEqual({
     value: 'Start @XXa end',
     mentions: [],
   });
@@ -423,7 +423,7 @@ test('cut, selected replacement, and plain-text paste transform text and entitie
     'Pasted\n',
   );
   const pasted = pushContent(hydrated, pastedContent, 'insert-characters');
-  expect(serializeMentionEditorState(pasted)).toEqual({
+  expect(serializeCommentEditorState(pasted)).toEqual({
     value: 'Pasted\nStart @Ada end',
     mentions: [{ ...ada, start: ada.start + 7, end: ada.end + 7 }],
   });

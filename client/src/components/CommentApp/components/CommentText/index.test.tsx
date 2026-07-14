@@ -1,7 +1,7 @@
 import { mount } from 'enzyme';
 import React from 'react';
 
-import MentionText from './index';
+import CommentText from './index';
 
 const mentions = [
   { key: 'ada-1', userId: '7', start: 0, end: 4, label: '@Ada' },
@@ -11,7 +11,7 @@ const mentions = [
 
 test('renders escaped plain text and repeated saved mention labels without links', () => {
   const wrapper = mount(
-    <MentionText
+    <CommentText
       text="@Ada <b>@Bea</b> @Ada"
       mentions={mentions}
       mentionedUsers={{
@@ -54,7 +54,7 @@ test.each([
   ],
 ])('renders all content as plain text for %s', (_name, malformedMentions) => {
   const wrapper = mount(
-    <MentionText
+    <CommentText
       text="@Ada and @Bea"
       mentions={malformedMentions}
       mentionedUsers={{ '7': { email: 'ada@example.com' } }}
@@ -67,7 +67,7 @@ test.each([
 
 test('omits deleted mentioned-user metadata without changing the visible snapshot', () => {
   const wrapper = mount(
-    <MentionText text="@Ada" mentions={[mentions[0]]} mentionedUsers={{}} />,
+    <CommentText text="@Ada" mentions={[mentions[0]]} mentionedUsers={{}} />,
   );
 
   expect(wrapper.find('.comment__mention').text()).toBe('@Ada');

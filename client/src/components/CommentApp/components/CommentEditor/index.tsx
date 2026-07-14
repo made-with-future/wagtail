@@ -7,17 +7,17 @@ import React from 'react';
 
 import { gettext } from '../../../../utils/gettext';
 import { serializeMentionOccurrences } from '../../utils/mentions';
-import { MentionSpan, MentionedUsersContext } from '../MentionText';
+import { MentionSpan, MentionedUsersContext } from '../CommentText';
 import {
-  createMentionEditorState,
+  createCommentEditorState,
   getMentionQueryFromEditorState,
   insertMentionSuggestion,
-  normalizeMentionEditorState,
-  serializeMentionEditorState,
+  normalizeCommentEditorState,
+  serializeCommentEditorState,
 } from './draftail';
 import { useMentionSuggestions } from './useMentionSuggestions';
 
-export interface MentionEditorProps {
+export interface CommentEditorProps {
   id: string;
   label: string;
   value: string;
@@ -87,7 +87,7 @@ const mergeDescriptionIds = (...values: Array<string | undefined>) =>
     ),
   ).join(' ');
 
-export default function MentionEditor({
+export default function CommentEditor({
   id,
   label,
   value,
@@ -101,9 +101,9 @@ export default function MentionEditor({
   focusOnMount = false,
   focusTarget = false,
   onChange,
-}: MentionEditorProps): React.ReactElement {
+}: CommentEditorProps): React.ReactElement {
   const [editorState, setEditorState] = React.useState(() =>
-    createMentionEditorState(value, mentions),
+    createCommentEditorState(value, mentions),
   );
   const [query, setQuery] = React.useState(() =>
     getMentionQueryFromEditorState(editorState),
@@ -124,10 +124,10 @@ export default function MentionEditor({
   );
 
   React.useLayoutEffect(() => {
-    const currentValue = serializeMentionEditorState(editorState);
+    const currentValue = serializeCommentEditorState(editorState);
     if (editorValuesEqual(currentValue, { value, mentions })) return;
 
-    const nextState = createMentionEditorState(value, mentions);
+    const nextState = createCommentEditorState(value, mentions);
     savedSelectionRef.current = nextState.getSelection();
     setEditorState(nextState);
     setQuery(getMentionQueryFromEditorState(nextState));
@@ -212,9 +212,9 @@ export default function MentionEditor({
 
   const updateEditorState = React.useCallback(
     (nextEditorState: EditorState) => {
-      const normalizedState = normalizeMentionEditorState(nextEditorState);
-      const previousValue = serializeMentionEditorState(editorState);
-      const nextValue = serializeMentionEditorState(normalizedState);
+      const normalizedState = normalizeCommentEditorState(nextEditorState);
+      const previousValue = serializeCommentEditorState(editorState);
+      const nextValue = serializeCommentEditorState(normalizedState);
 
       savedSelectionRef.current = normalizedState.getSelection();
       setEditorState(normalizedState);
@@ -311,9 +311,7 @@ export default function MentionEditor({
   return (
     <MentionedUsersContext.Provider value={displayedMentionedUsers}>
       <div
-        className={['comment__mention-input', className]
-          .filter(Boolean)
-          .join(' ')}
+        className={['comment__editor', className].filter(Boolean).join(' ')}
         onCompositionStart={() => {
           setComposing(true);
           setQuery(null);

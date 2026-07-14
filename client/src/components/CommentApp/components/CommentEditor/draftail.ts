@@ -14,7 +14,7 @@ import { v4 as uuidv4 } from 'uuid';
 
 import { findMentionQuery } from '../../utils/mentions';
 
-export interface MentionEditorValue {
+export interface CommentEditorValue {
   value: string;
   mentions: MentionOccurrence[];
 }
@@ -118,7 +118,7 @@ const isMentionEntity = (content: ContentState, entityKey: string | null) =>
   entityKey !== null &&
   content.getEntity(entityKey).getType() === MENTION_ENTITY_TYPE;
 
-export function createMentionEditorState(
+export function createCommentEditorState(
   value: string,
   mentions: readonly MentionOccurrence[],
 ): EditorState {
@@ -152,9 +152,9 @@ export function createMentionEditorState(
   return EditorState.createWithContent(content);
 }
 
-export function serializeMentionEditorState(
+export function serializeCommentEditorState(
   editorState: EditorState,
-): MentionEditorValue {
+): CommentEditorValue {
   const content = editorState.getCurrentContent();
   const value = content.getPlainText('\n');
   const blockRanges = getBlockRanges(content);
@@ -197,7 +197,7 @@ export function serializeMentionEditorState(
   };
 }
 
-export function normalizeMentionEditorState(
+export function normalizeCommentEditorState(
   editorState: EditorState,
 ): EditorState {
   const content = editorState.getCurrentContent();
